@@ -8,12 +8,149 @@ from config import CONSOLIDES, COUNTRY_CODES, COUNTRY_NAMES, CLOUD_MODE
 from core.forecast_engine import (
     run_all_forecasts, get_methods_for_frequency, SEASON_MAP,
 )
+from core.tempdisagg import disaggregate_annual
 from io_utils.excel_reader import list_sheets, read_donnees_calcul, read_codification
 from io_utils.excel_writer import write_previsions_excel
 from ui.charts import chart_forecast_comparison
 from ui.components import download_button
 
 st.title("📈 Module 2 — Prévisions")
+
+# ── Mode ──────────────────────────────────────────────────────────────────
+mode = st.radio("Mode", ["Prévision classique", "Désagrégation temporelle"],
+                horizontal=True, key="prev_mode")
+
+# ══════════════════════════════════════════════════════════════════════════
+#  MODE DÉSAGRÉGATION TEMPORELLE
+# ══════════════════════════════════════════════════════════════════════════
+if mode == "Désagrégation temporelle":
+    st.header("Désagrégation annuel → infra-annuel")
+    st.info("Entrez une série annuelle et la méthode reproduira sa structure "
+            "à la fréquence choisie (Chow-Lin ou Denton-Cholette).")
+
+    target_freq = st.radio("Fréquence cible", ["Trimestrielle", "Mensuelle"],
+                           horizontal=True, key="disagg_freq")
+
+    st.subheader("1. Série annuelle")
+    annual_file = st.file_uploader("Fichier Excel avec données annuelles",
+                                   type=["xlsx"], key="disagg_annual_file")
+    if annual_file is None:
+        st.stop()
+
+    annual_sheets = list_sheets(annual_file)
+    annual_file.seek(0)
+    annual_sheet = st.selectbox("Feuille", annual_sheets, key="disagg_annual_sheet")
+    annual_file.seek(0)
+    df_annual = pd.read_excel(annual_file, sheet_name=annual_sheet, engine="openpyxl")
+
+    # Première colonne = année
+    year_col = df_annual.columns[0]
+    df_annual = df_annual.rename(columns={year_col: "Année"})
+    df_annual["Année"] = df_annual["Année"].astype(str).str[:4].astype(int)
+    df_annual = df_annual.set_index("Année")
+    annual_vars = [c for c in df_annual.columns if df_annual[c].dtype in ("float64", "int64", "float32")]
+    st.dataframe(df_annual[annual_vars].head(10), use_container_width=True)
+    st.caption(f"{len(df_annual)} années × {len(annual_vars)} variables")
+
+    # Indicateur HF optionnel
+    st.subheader("2. Indicateur haute fréquence (optionnel)")
+    st.caption("Si fourni, la méthode Chow-Lin sera utilisée. Sinon, Denton-Cholette.")
+    hf_file = st.file_uploader("Fichier Excel HF (optionnel)", type=["xlsx"],
+                                key="disagg_hf_file")
+    hf_df = None
+    if hf_file is not None:
+        hf_sheets = list_sheets(hf_file)
+        hf_file.seek(0)
+        hf_sheet = st.selectbox("Feuille HF", hf_sheets, key="disagg_hf_sheet")
+        hf_file.seek(0)
+        hf_df = pd.read_excel(hf_file, sheet_name=hf_sheet, engine="openpyxl")
+        # Supprimer la colonne date pour ne garder que les indicateurs
+        hf_df = hf_df.select_dtypes(include="number")
+        st.dataframe(hf_df.head(5), use_container_width=True)
+
+    # Variables à désagréger
+    selected_annual_vars = st.multiselect("Variables à désagréger", annual_vars,
+                                          default=annual_vars[:5], key="disagg_vars")
+
+    if st.button("🚀 Lancer la désagrégation", type="primary", key="run_disagg"):
+        results_disagg = {}
+        progress = st.progress(0)
+        for i, var in enumerate(selected_annual_vars):
+            series_a = df_annual[var].dropna()
+            if len(series_a) < 3:
+                continue
+            result = disaggregate_annual(series_a, target_freq, hf_df)
+            results_disagg[var] = result
+            progress.progress((i + 1) / len(selected_annual_vars))
+        st.session_state["disagg_results"] = results_disagg
+        st.session_state["disagg_freq"] = target_freq
+        method_used = "Chow-Lin" if hf_df is not None else "Denton-Cholette"
+        st.success(f"✅ {len(results_disagg)} variables désagrégées ({method_used})")
+
+    if "disagg_results" not in st.session_state:
+        st.stop()
+
+    results_disagg = st.session_state["disagg_results"]
+    target_freq_r = st.session_state.get("disagg_freq", target_freq)
+
+    st.header("3. Résultats")
+
+    tab_table, tab_chart = st.tabs(["📊 Tableau", "📈 Graphique"])
+
+    with tab_table:
+        # Combiner toutes les séries désagrégées en un DataFrame
+        if results_disagg:
+            combined = pd.DataFrame(results_disagg)
+            combined.index = combined.index.astype(str)
+            st.dataframe(combined, use_container_width=True)
+
+    with tab_chart:
+        var_show = st.selectbox("Variable", list(results_disagg.keys()),
+                                key="disagg_var_show")
+        if var_show and var_show in results_disagg:
+            import plotly.graph_objects as go
+            series_hf = results_disagg[var_show]
+            fig = go.Figure()
+            fig.add_trace(go.Scatter(
+                x=[str(p) for p in series_hf.index],
+                y=series_hf.values,
+                mode="lines+markers", name=f"{var_show} ({target_freq_r})",
+            ))
+            # Superposer les valeurs annuelles
+            if var_show in df_annual.columns:
+                s_freq = 4 if target_freq_r == "Trimestrielle" else 12
+                annual_x = [str(series_hf.index[i * s_freq]) for i in range(len(df_annual[var_show].dropna()))
+                            if i * s_freq < len(series_hf)]
+                annual_y = df_annual[var_show].dropna().values[:len(annual_x)]
+                fig.add_trace(go.Bar(
+                    x=annual_x, y=annual_y,
+                    name=f"{var_show} (Annuel)", opacity=0.3,
+                ))
+            fig.update_layout(title=f"Désagrégation — {var_show}",
+                              xaxis_title="Période", yaxis_title="Valeur")
+            st.plotly_chart(fig, use_container_width=True)
+
+    # Export
+    st.header("4. Export")
+    if st.button("📥 Exporter la désagrégation", key="export_disagg"):
+        import io
+        combined = pd.DataFrame(results_disagg)
+        combined.index = combined.index.astype(str)
+        combined.index.name = "Période"
+        buf = io.BytesIO()
+        with pd.ExcelWriter(buf, engine="xlsxwriter") as writer:
+            combined.to_excel(writer, sheet_name="Désagrégation")
+        download_button(
+            buf.getvalue(),
+            f"Desagregation_{target_freq_r[:4]}.xlsx",
+            "📥 Télécharger",
+        )
+
+    st.stop()
+
+# ══════════════════════════════════════════════════════════════════════════
+#  MODE PRÉVISION CLASSIQUE (code existant)
+# ══════════════════════════════════════════════════════════════════════════
 
 # ── Fréquence ────────────────────────────────────────────────────────────
 st.header("1. Fréquence et données")
