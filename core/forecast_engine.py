@@ -1,7 +1,10 @@
-"""Moteur de prévision — méthodes naïves + ARIMA/ETS."""
+"""Moteur de prévision — méthodes naïves + ARIMA/ETS (multi-fréquence)."""
 import numpy as np
 import pandas as pd
 import warnings
+
+# Saisonnalités par fréquence
+SEASON_MAP = {"Mensuelle": 12, "Trimestrielle": 4, "Annuelle": 1}
 
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -20,6 +23,8 @@ def forecast_naive_seasonal(series: pd.Series, h: int,
                             season: int = 12) -> np.ndarray:
     """Naïve saisonnière : X_{t+h} = X_{t+h-season}."""
     vals = series.dropna().values
+    if season <= 1:
+        return np.full(h, vals[-1] if len(vals) > 0 else np.nan)
     preds = np.full(h, np.nan)
     for i in range(h):
         idx = len(vals) - season + i
@@ -32,9 +37,15 @@ def forecast_naive_seasonal(series: pd.Series, h: int,
 
 def forecast_seasonal_growth(series: pd.Series, h: int,
                              season: int = 12) -> np.ndarray:
-    """Croissance saisonnière : X_{t+h} = X_{t+h-12} * X_t / X_{t-12}."""
+    """Croissance saisonnière : X_{t+h} = X_{t+h-s} * X_t / X_{t-s}."""
     vals = series.dropna().values
     n = len(vals)
+    if season <= 1:
+        # Pour annuel : tendance simple par taux de croissance moyen
+        if n < 2:
+            return np.full(h, np.nan)
+        growth = vals[-1] / vals[-2] if vals[-2] != 0 else 1.0
+        return np.array([vals[-1] * growth ** (i + 1) for i in range(h)])
     if n < season + 1:
         return np.full(h, np.nan)
     growth = vals[-1] / vals[-1 - season] if vals[-1 - season] != 0 else 1.0
@@ -48,7 +59,7 @@ def forecast_seasonal_growth(series: pd.Series, h: int,
 
 def forecast_trend_linear(series: pd.Series, h: int,
                           window: int = 24) -> np.ndarray:
-    """Tendance linéaire sur les `window` derniers mois."""
+    """Tendance linéaire sur les `window` dernières observations."""
     vals = series.dropna().values
     w = min(window, len(vals))
     y = vals[-w:]
@@ -63,17 +74,18 @@ def forecast_trend_linear(series: pd.Series, h: int,
 # ────────────────────────────────────────────────────────────────────────────
 # ARIMA / ETS
 # ────────────────────────────────────────────────────────────────────────────
-def forecast_arima(series: pd.Series, h: int) -> dict:
+def forecast_arima(series: pd.Series, h: int, season: int = 12) -> dict:
     """Auto-ARIMA via pmdarima."""
     try:
         import pmdarima as pm
         vals = series.dropna().values
-        if len(vals) < 24:
+        min_obs = max(2 * season, 10) if season > 1 else 6
+        if len(vals) < min_obs:
             return {"forecast": np.full(h, np.nan), "conf_int": None}
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
             model = pm.auto_arima(
-                vals, seasonal=True, m=12,
+                vals, seasonal=(season > 1), m=max(season, 1),
                 stepwise=True, suppress_warnings=True,
                 error_action="ignore",
                 max_order=5, max_p=3, max_q=3,
@@ -85,25 +97,31 @@ def forecast_arima(series: pd.Series, h: int) -> dict:
         return {"forecast": np.full(h, np.nan), "conf_int": None}
 
 
-def forecast_ets(series: pd.Series, h: int) -> dict:
+def forecast_ets(series: pd.Series, h: int, season: int = 12) -> dict:
     """ETS via statsmodels."""
     try:
         from statsmodels.tsa.holtwinters import ExponentialSmoothing
         vals = series.dropna().values
-        if len(vals) < 24:
+        min_obs = max(2 * season, 10) if season > 1 else 6
+        if len(vals) < min_obs:
             return {"forecast": np.full(h, np.nan), "conf_int": None}
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
-            model = ExponentialSmoothing(
-                vals, seasonal_periods=12,
-                trend="add", seasonal="add",
-                initialization_method="estimated",
-            ).fit(optimized=True)
+            if season > 1:
+                model = ExponentialSmoothing(
+                    vals, seasonal_periods=season,
+                    trend="add", seasonal="add",
+                    initialization_method="estimated",
+                ).fit(optimized=True)
+            else:
+                model = ExponentialSmoothing(
+                    vals, trend="add", seasonal=None,
+                    initialization_method="estimated",
+                ).fit(optimized=True)
             fc = model.forecast(h)
-            # IC approximatif
             residuals = model.resid
             se = np.std(residuals) * np.sqrt(np.arange(1, h + 1))
-            lo = fc - 1.28 * se  # 80%
+            lo = fc - 1.28 * se
             hi = fc + 1.28 * se
         return {"forecast": fc, "conf_int": np.column_stack([lo, hi])}
     except Exception:
@@ -121,7 +139,8 @@ def backtest_method(series: pd.Series, method_fn, h: int,
     """
     vals = series.dropna().values
     n = len(vals)
-    if n < bt_window + h + 12:
+    min_train = max(kwargs.get("season", 12) * 2, 10) if kwargs.get("season", 12) > 1 else 6
+    if n < bt_window + h + min_train:
         return {"mape": np.nan, "rmse": np.nan}
 
     errors = []
@@ -147,56 +166,94 @@ def backtest_method(series: pd.Series, method_fn, h: int,
 
 
 # ────────────────────────────────────────────────────────────────────────────
-# Dispatch
+# Dispatch — paramétré par la saisonnalité
 # ────────────────────────────────────────────────────────────────────────────
-METHOD_DISPATCH = {
-    "MM3":  lambda s, h: forecast_mm(s, h, 3),
-    "MM6":  lambda s, h: forecast_mm(s, h, 6),
-    "MM12": lambda s, h: forecast_mm(s, h, 12),
-    "NS":   lambda s, h: forecast_naive_seasonal(s, h),
-    "CS":   lambda s, h: forecast_seasonal_growth(s, h),
-    "TL":   lambda s, h: forecast_trend_linear(s, h),
-    "ARIMA": lambda s, h: forecast_arima(s, h),
-    "ETS":  lambda s, h: forecast_ets(s, h),
-}
+def _build_dispatch(season: int):
+    """Construit les dictionnaires de dispatch pour une saisonnalité donnée."""
+    # Fenêtre tendance linéaire adaptée
+    tl_window = {12: 24, 4: 8, 1: 5}.get(season, 24)
 
-BACKTEST_DISPATCH = {
-    "MM3":  lambda s, h, bt: backtest_method(s, forecast_mm, h, bt, window=3),
-    "MM6":  lambda s, h, bt: backtest_method(s, forecast_mm, h, bt, window=6),
-    "MM12": lambda s, h, bt: backtest_method(s, forecast_mm, h, bt, window=12),
-    "NS":   lambda s, h, bt: backtest_method(s, forecast_naive_seasonal, h, bt),
-    "CS":   lambda s, h, bt: backtest_method(s, forecast_seasonal_growth, h, bt),
-    "TL":   lambda s, h, bt: backtest_method(s, forecast_trend_linear, h, bt),
-    "ARIMA": lambda s, h, bt: backtest_method(
-        s, lambda sr, h: forecast_arima(sr, h)["forecast"], h, bt),
-    "ETS":  lambda s, h, bt: backtest_method(
-        s, lambda sr, h: forecast_ets(sr, h)["forecast"], h, bt),
-}
+    # Fenêtres de moyenne mobile adaptées
+    if season >= 12:
+        mm_windows = {"MM3": 3, "MM6": 6, "MM12": 12}
+    elif season >= 4:
+        mm_windows = {"MM2": 2, "MM4": 4, "MM8": 8}
+    else:
+        mm_windows = {"MM2": 2, "MM3": 3, "MM5": 5}
+
+    method_dispatch = {}
+    backtest_dispatch = {}
+
+    for name, w in mm_windows.items():
+        method_dispatch[name] = lambda s, h, _w=w: forecast_mm(s, h, _w)
+        backtest_dispatch[name] = lambda s, h, bt, _w=w: backtest_method(
+            s, forecast_mm, h, bt, window=_w)
+
+    method_dispatch["NS"] = lambda s, h: forecast_naive_seasonal(s, h, season)
+    backtest_dispatch["NS"] = lambda s, h, bt: backtest_method(
+        s, forecast_naive_seasonal, h, bt, season=season)
+
+    method_dispatch["CS"] = lambda s, h: forecast_seasonal_growth(s, h, season)
+    backtest_dispatch["CS"] = lambda s, h, bt: backtest_method(
+        s, forecast_seasonal_growth, h, bt, season=season)
+
+    method_dispatch["TL"] = lambda s, h: forecast_trend_linear(s, h, tl_window)
+    backtest_dispatch["TL"] = lambda s, h, bt: backtest_method(
+        s, forecast_trend_linear, h, bt, window=tl_window)
+
+    method_dispatch["ARIMA"] = lambda s, h: forecast_arima(s, h, season)
+    backtest_dispatch["ARIMA"] = lambda s, h, bt: backtest_method(
+        s, lambda sr, h, season=season: forecast_arima(sr, h, season)["forecast"],
+        h, bt)
+
+    method_dispatch["ETS"] = lambda s, h: forecast_ets(s, h, season)
+    backtest_dispatch["ETS"] = lambda s, h, bt: backtest_method(
+        s, lambda sr, h, season=season: forecast_ets(sr, h, season)["forecast"],
+        h, bt)
+
+    return method_dispatch, backtest_dispatch
+
+
+def get_methods_for_frequency(freq: str) -> list:
+    """Retourne la liste des méthodes disponibles pour une fréquence."""
+    season = SEASON_MAP.get(freq, 12)
+    dispatch, _ = _build_dispatch(season)
+    return list(dispatch.keys())
+
+
+# Dispatch mensuel par défaut (rétrocompatibilité)
+METHOD_DISPATCH, BACKTEST_DISPATCH = _build_dispatch(12)
 
 
 def run_all_forecasts(series: pd.Series, h: int, methods: list,
-                      bt_window: int = 12) -> dict:
+                      bt_window: int = 12, freq: str = "Mensuelle") -> dict:
     """
     Lance toutes les méthodes de prévision + backtesting pour une série.
 
+    Parameters
+    ----------
+    freq : "Mensuelle", "Trimestrielle" ou "Annuelle"
+
     Returns
     -------
-    dict avec 'forecasts' (method→array), 'backtesting' (method→{mape,rmse}),
-    'best_method' (str)
+    dict avec 'forecasts', 'backtesting', 'best_method'
     """
+    season = SEASON_MAP.get(freq, 12)
+    method_dispatch, backtest_dispatch = _build_dispatch(season)
+
     forecasts = {}
     backtesting = {}
 
     for m in methods:
-        # Prévision
-        result = METHOD_DISPATCH[m](series, h)
+        if m not in method_dispatch:
+            continue
+        result = method_dispatch[m](series, h)
         if isinstance(result, dict):
             forecasts[m] = result["forecast"]
         else:
             forecasts[m] = result
 
-        # Backtesting
-        bt = BACKTEST_DISPATCH[m](series, h, bt_window)
+        bt = backtest_dispatch[m](series, h, bt_window)
         backtesting[m] = bt
 
     # Meilleure méthode par MAPE
