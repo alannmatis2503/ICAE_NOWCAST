@@ -14,6 +14,50 @@ from io_utils.excel_writer import write_previsions_excel
 from ui.charts import chart_forecast_comparison
 from ui.components import download_button
 
+
+# ────────────────────────────────────────────────────────────────────────────
+# Fonctions utilitaires (parsing dates multi-fréquence)
+# ────────────────────────────────────────────────────────────────────────────
+def _parse_quarterly_date(val):
+    """Parse '2024T1', '2024Q1', '2024-Q1' etc. en Timestamp."""
+    s = str(val).strip().upper()
+    for sep in ["T", "Q", "-Q", "-T"]:
+        if sep in s:
+            parts = s.split(sep[-1])
+            if len(parts) == 2:
+                try:
+                    year, q = int(parts[0].replace("-", "")), int(parts[1])
+                    month = (q - 1) * 3 + 1
+                    return pd.Timestamp(year=year, month=month, day=1)
+                except (ValueError, TypeError):
+                    pass
+    return pd.NaT
+
+
+def _future_dates(last_date, horizon, freq):
+    """Génère les dates futures selon la fréquence."""
+    last = pd.Timestamp(last_date)
+    if freq == "Mensuelle":
+        return pd.date_range(last + pd.DateOffset(months=1),
+                             periods=horizon, freq="MS")
+    elif freq == "Trimestrielle":
+        return pd.date_range(last + pd.DateOffset(months=3),
+                             periods=horizon, freq="QS")
+    else:  # Annuelle
+        return pd.date_range(last + pd.DateOffset(years=1),
+                             periods=horizon, freq="YS")
+
+
+def _format_dates(dates, freq):
+    """Formate les dates pour l'affichage selon la fréquence."""
+    if freq == "Mensuelle":
+        return dates.strftime("%Y-%m")
+    elif freq == "Trimestrielle":
+        return [f"{d.year}T{(d.month - 1) // 3 + 1}" for d in dates]
+    else:
+        return dates.strftime("%Y")
+
+
 st.title("📈 Module 2 — Prévisions")
 
 # ── Mode ──────────────────────────────────────────────────────────────────
@@ -507,46 +551,3 @@ if st.button("📥 Générer le fichier de prévisions", key="export_prev"):
         f"Prevision_{country}_{freq_tag}_Q{(pd.Timestamp.now().month - 1) // 3 + 1}_{pd.Timestamp.now().year}.xlsx",
         "📥 Télécharger les prévisions",
     )
-
-
-# ────────────────────────────────────────────────────────────────────────────
-# Fonctions utilitaires (parsing dates multi-fréquence)
-# ────────────────────────────────────────────────────────────────────────────
-def _parse_quarterly_date(val):
-    """Parse '2024T1', '2024Q1', '2024-Q1' etc. en Timestamp."""
-    s = str(val).strip().upper()
-    for sep in ["T", "Q", "-Q", "-T"]:
-        if sep in s:
-            parts = s.split(sep[-1])
-            if len(parts) == 2:
-                try:
-                    year, q = int(parts[0].replace("-", "")), int(parts[1])
-                    month = (q - 1) * 3 + 1
-                    return pd.Timestamp(year=year, month=month, day=1)
-                except (ValueError, TypeError):
-                    pass
-    return pd.NaT
-
-
-def _future_dates(last_date, horizon, freq):
-    """Génère les dates futures selon la fréquence."""
-    last = pd.Timestamp(last_date)
-    if freq == "Mensuelle":
-        return pd.date_range(last + pd.DateOffset(months=1),
-                             periods=horizon, freq="MS")
-    elif freq == "Trimestrielle":
-        return pd.date_range(last + pd.DateOffset(months=3),
-                             periods=horizon, freq="QS")
-    else:  # Annuelle
-        return pd.date_range(last + pd.DateOffset(years=1),
-                             periods=horizon, freq="YS")
-
-
-def _format_dates(dates, freq):
-    """Formate les dates pour l'affichage selon la fréquence."""
-    if freq == "Mensuelle":
-        return dates.strftime("%Y-%m")
-    elif freq == "Trimestrielle":
-        return [f"{d.year}T{(d.month - 1) // 3 + 1}" for d in dates]
-    else:
-        return dates.strftime("%Y")
