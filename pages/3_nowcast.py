@@ -8,7 +8,7 @@ from config import COUNTRY_CODES, COUNTRY_NAMES, NOWCAST_MODELS
 from core.nowcast_engine import run_nowcast
 from core.quarterly import agg_m_to_q
 from core.tempdisagg import disaggregate_annual_to_quarterly
-from io_utils.excel_reader import list_sheets
+from io_utils.excel_reader import list_sheets, read_codification
 from io_utils.excel_writer import write_nowcast_excel
 from ui.charts import chart_nowcast, chart_ga_nowcast
 from ui.components import download_button
@@ -26,11 +26,16 @@ hf_source = st.radio(
 )
 
 hf_df = None
+_now_codif = None
+
 if hf_source == "Données du Module 1" and "donnees_calcul" in st.session_state:
     available = list(st.session_state["donnees_calcul"].keys())
     country = st.selectbox("Pays", available, key="now_country")
     hf_df = st.session_state["donnees_calcul"][country]
     st.success(f"✅ Données HF chargées depuis Module 1 ({country})")
+    _codif_dict = st.session_state.get("codification", {})
+    if country in _codif_dict:
+        _now_codif = _codif_dict[country]
 else:
     uploaded_hf = st.file_uploader("Fichier des indicateurs mensuels", type=["xlsx"],
                                     key="now_hf_upload")
@@ -40,6 +45,14 @@ else:
         sheet_hf = st.selectbox("Feuille HF", sheets, key="now_hf_sheet")
         uploaded_hf.seek(0)
         hf_df = pd.read_excel(uploaded_hf, sheet_name=sheet_hf, engine="openpyxl")
+        # Lire la Codification si disponible dans le même classeur
+        uploaded_hf.seek(0)
+        if "Codification" in sheets:
+            try:
+                _now_codif = read_codification(uploaded_hf)
+                uploaded_hf.seek(0)
+            except Exception:
+                pass
         country = "XXX"
         for c in COUNTRY_CODES:
             if c in uploaded_hf.name:
@@ -60,25 +73,21 @@ with col2:
     non_date = [c for c in hf_cols if c != date_col]
     # Par défaut : variables actives de la Codification (PRIOR > 0, Statut Actif)
     default_hf = non_date
-    codif_dict = st.session_state.get("codification", {})
-    if codif_dict:
-        # Chercher la codification du pays courant
-        codif_df = next(iter(codif_dict.values()), None)
-        if codif_df is not None and "Code" in codif_df.columns and "PRIOR" in codif_df.columns:
-            active_codes = set()
-            for _, row in codif_df.iterrows():
-                try:
-                    if float(row.get("PRIOR", 0)) > 0:
-                        statut = str(row.get("Statut", "Actif")).lower()
-                        if not statut.startswith("inact"):
-                            active_codes.add(row["Code"])
-                            if "Label" in codif_df.columns:
-                                active_codes.add(row["Label"])
-                except (ValueError, TypeError):
-                    pass
-            filtered = [c for c in non_date if c in active_codes]
-            if filtered:
-                default_hf = filtered
+    if _now_codif is not None and "Code" in _now_codif.columns and "PRIOR" in _now_codif.columns:
+        active_codes = set()
+        for _, row in _now_codif.iterrows():
+            try:
+                if float(row.get("PRIOR", 0)) > 0:
+                    statut = str(row.get("Statut", "Actif")).lower()
+                    if not statut.startswith("inact"):
+                        active_codes.add(str(row["Code"]))
+                        if "Label" in _now_codif.columns and pd.notna(row.get("Label")):
+                            active_codes.add(str(row["Label"]))
+            except (ValueError, TypeError):
+                pass
+        filtered = [c for c in non_date if c in active_codes]
+        if filtered:
+            default_hf = filtered
     hf_vars = st.multiselect("Variables HF", non_date, default=default_hf,
                              key="now_hf_vars")
 

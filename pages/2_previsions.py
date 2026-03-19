@@ -58,6 +58,27 @@ def _format_dates(dates, freq):
         return dates.strftime("%Y")
 
 
+def _get_active_vars(codif_df, available_cols):
+    """Extrait les variables actives depuis la Codification (PRIOR > 0, Statut Actif)."""
+    if codif_df is None:
+        return None
+    if "Code" not in codif_df.columns or "PRIOR" not in codif_df.columns:
+        return None
+    active_names = set()
+    for _, row in codif_df.iterrows():
+        try:
+            if float(row.get("PRIOR", 0)) > 0:
+                statut = str(row.get("Statut", "Actif")).lower()
+                if not statut.startswith("inact"):
+                    active_names.add(str(row["Code"]))
+                    if "Label" in codif_df.columns and pd.notna(row.get("Label")):
+                        active_names.add(str(row["Label"]))
+        except (ValueError, TypeError):
+            pass
+    filtered = [c for c in available_cols if c in active_names]
+    return filtered if filtered else None
+
+
 st.title("📈 Module 2 — Prévisions")
 
 # ── Mode ──────────────────────────────────────────────────────────────────
@@ -216,12 +237,16 @@ if not CLOUD_MODE:
 source = st.radio("Source", source_opts, horizontal=True, key="prev_source")
 
 donnees = None
+codif_df = None
 country = "XXX"
 
 if source == "Données du Module 1" and has_session_data:
     available_countries = list(st.session_state["donnees_calcul"].keys())
     country = st.selectbox("Pays", available_countries, key="prev_country")
     donnees = st.session_state["donnees_calcul"][country]
+    _codif_store = st.session_state.get("codification", {})
+    if country in _codif_store:
+        codif_df = _codif_store[country]
 elif source == "Upload d'un fichier":
     uploaded = st.file_uploader("Fichier Excel (.xlsx)", type=["xlsx"],
                                 key="prev_upload")
@@ -263,6 +288,17 @@ elif source == "Upload d'un fichier":
 
     donnees = df
 
+    # Lire la Codification si disponible dans le même classeur
+    uploaded.seek(0)
+    _up_sheets = list_sheets(uploaded)
+    uploaded.seek(0)
+    if "Codification" in _up_sheets:
+        try:
+            codif_df = read_codification(uploaded)
+            uploaded.seek(0)
+        except Exception:
+            pass
+
     for c in COUNTRY_CODES:
         if c in uploaded.name.upper():
             country = c
@@ -284,6 +320,11 @@ else:
                              if "Donnees_calcul" in sheets else 0,
                              key="prev_sheet_loc")
         donnees = read_donnees_calcul(filepath, sheet=sheet)
+        if "Codification" in sheets:
+            try:
+                codif_df = read_codification(filepath)
+            except Exception:
+                pass
         for c in COUNTRY_CODES:
             if c in selected.upper():
                 country = c
@@ -294,14 +335,67 @@ else:
 if donnees is None:
     st.stop()
 
-# Afficher un aperçu
+# ── Aperçu et période ────────────────────────────────────────────────────
+data_cols = [c for c in donnees.columns if c != "Date"]
 st.dataframe(donnees.head(10), use_container_width=True)
-st.caption(f"{len(donnees)} observations × {len(donnees.columns) - 1} variables")
+st.caption(f"{len(donnees)} observations × {len(data_cols)} variables")
+
+# Sélection de la période
+dates_series = pd.to_datetime(donnees["Date"], errors="coerce")
+var_ranges = {}
+for col in data_cols:
+    valid_idx = donnees[col].notna() & dates_series.notna()
+    valid_dates = dates_series[valid_idx]
+    if len(valid_dates) > 0:
+        var_ranges[col] = (valid_dates.min(), valid_dates.max())
+
+if var_ranges:
+    common_start = max(r[0] for r in var_ranges.values())
+    common_end = min(r[1] for r in var_ranges.values())
+    total_start = min(r[0] for r in var_ranges.values())
+    total_end = max(r[1] for r in var_ranges.values())
+
+    if common_start > common_end:
+        st.warning("⚠️ Aucune période commune — période totale utilisée.")
+        common_start, common_end = total_start, total_end
+
+    with st.expander("📅 Période des données", expanded=True):
+        st.caption(
+            f"Période commune : **{common_start.strftime('%Y-%m')}** — "
+            f"**{common_end.strftime('%Y-%m')}** | "
+            f"Totale : {total_start.strftime('%Y-%m')} — {total_end.strftime('%Y-%m')}"
+        )
+        pc1, pc2 = st.columns(2)
+        with pc1:
+            start_date = st.date_input(
+                "Début", value=common_start.date(),
+                min_value=total_start.date(), max_value=total_end.date(),
+                key="prev_start_date",
+            )
+        with pc2:
+            end_date = st.date_input(
+                "Fin", value=common_end.date(),
+                min_value=total_start.date(), max_value=total_end.date(),
+                key="prev_end_date",
+            )
+        mask = (dates_series >= pd.Timestamp(start_date)) & (
+            dates_series <= pd.Timestamp(end_date)
+        )
+        donnees = donnees[mask].reset_index(drop=True)
+        data_cols = [c for c in donnees.columns if c != "Date"]
+        st.caption(f"✅ {len(donnees)} observations retenues")
+
+if donnees.empty:
+    st.warning("Aucune observation dans la période sélectionnée.")
+    st.stop()
+
+# ── Variables actives ────────────────────────────────────────────────────
+active_vars = _get_active_vars(codif_df, data_cols)
+has_codif = active_vars is not None
 
 # ── Paramètres ────────────────────────────────────────────────────────────
 st.header("2. Paramètres de prévision")
 
-data_cols = [c for c in donnees.columns if c != "Date"]
 available_methods = get_methods_for_frequency(freq)
 
 freq_labels = {"Mensuelle": "mois", "Trimestrielle": "trimestres", "Annuelle": "années"}
@@ -324,11 +418,19 @@ with col2:
         default=default_methods,
         key="prev_methods",
     )
-    var_mode = st.radio("Variables à prévoir", ["Toutes", "Sélection manuelle"],
-                        key="prev_var_mode")
+    var_options = (
+        ["Variables actives (Codification)", "Toutes", "Sélection manuelle"]
+        if has_codif
+        else ["Toutes", "Sélection manuelle"]
+    )
+    var_mode = st.radio("Variables à prévoir", var_options, key="prev_var_mode")
 
-if var_mode == "Sélection manuelle":
-    selected_vars = st.multiselect("Variables", data_cols, default=data_cols[:5],
+if var_mode == "Variables actives (Codification)":
+    selected_vars = active_vars
+    st.info(f"🎯 {len(selected_vars)} variables actives depuis la Codification")
+elif var_mode == "Sélection manuelle":
+    default_sel = active_vars[:10] if has_codif else data_cols[:5]
+    selected_vars = st.multiselect("Variables", data_cols, default=default_sel,
                                    key="prev_vars")
 else:
     selected_vars = data_cols
