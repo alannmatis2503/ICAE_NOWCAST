@@ -5,7 +5,7 @@ import numpy as np
 from pathlib import Path
 
 from config import (CONSOLIDES, COUNTRY_CODES, COUNTRY_NAMES,
-                    PIB_2014, POIDS_PIB, CLOUD_MODE)
+                    PIB_2014, POIDS_PIB, CLOUD_MODE, CEMAC_TEMPLATE)
 from core.cemac_engine import compute_icae_cemac, quarterly_cemac
 from core.icae_engine import run_icae_pipeline
 from io_utils.excel_reader import (
@@ -146,8 +146,68 @@ if not icae_dict:
     st.warning("Aucun ICAE disponible.")
     st.stop()
 
+# ── Période commune ──────────────────────────────────────────────────────
+st.header("2. Période de calcul")
+
+# Déterminer la fenêtre temporelle commune des séries pays
+_country_ranges = {}
+for code, series in icae_dict.items():
+    if hasattr(series, "index"):
+        idx = pd.to_datetime(series.index)
+        valid = idx[series.notna().values] if hasattr(series, "notna") else idx
+        if len(valid) > 0:
+            _country_ranges[code] = (valid.min(), valid.max())
+
+if _country_ranges:
+    _common_start = max(r[0] for r in _country_ranges.values())
+    _common_end = min(r[1] for r in _country_ranges.values())
+    _total_start = min(r[0] for r in _country_ranges.values())
+    _total_end = max(r[1] for r in _country_ranges.values())
+
+    with st.expander("📅 Fenêtre temporelle des séries pays", expanded=True):
+        _range_rows = []
+        for code, (s, e) in _country_ranges.items():
+            _range_rows.append({
+                "Pays": COUNTRY_NAMES.get(code, code),
+                "Début": s.strftime("%Y-%m"),
+                "Fin": e.strftime("%Y-%m"),
+            })
+        st.dataframe(pd.DataFrame(_range_rows), use_container_width=True,
+                     hide_index=True)
+        st.caption(
+            f"Période commune : **{_common_start.strftime('%Y-%m')}** — "
+            f"**{_common_end.strftime('%Y-%m')}** | "
+            f"Totale : {_total_start.strftime('%Y-%m')} — {_total_end.strftime('%Y-%m')}"
+        )
+
+    _pc1, _pc2 = st.columns(2)
+    with _pc1:
+        _cemac_start = pd.Timestamp(st.date_input(
+            "Début", value=_common_start.date(),
+            min_value=_total_start.date(), max_value=_total_end.date(),
+            key="cemac_start_date",
+        ))
+    with _pc2:
+        _cemac_end = pd.Timestamp(st.date_input(
+            "Fin", value=_common_end.date(),
+            min_value=_total_start.date(), max_value=_total_end.date(),
+            key="cemac_end_date",
+        ))
+
+    # Filtrer les séries selon la période choisie
+    icae_dict_filtered = {}
+    for code, series in icae_dict.items():
+        if hasattr(series, "index"):
+            idx = pd.to_datetime(series.index)
+            mask = (idx >= _cemac_start) & (idx <= _cemac_end)
+            icae_dict_filtered[code] = series[mask]
+    icae_dict = icae_dict_filtered
+else:
+    _total_start = None
+    _total_end = None
+
 # ── Pondérations ─────────────────────────────────────────────────────────
-st.header("2. Pondérations PIB")
+st.header("3. Pondérations PIB")
 
 poids_data = []
 for code in COUNTRY_CODES:
@@ -175,7 +235,7 @@ pays_inclus = st.multiselect(
 )
 
 # ── Calcul CEMAC ─────────────────────────────────────────────────────────
-st.header("3. Calcul ICAE CEMAC")
+st.header("4. Calcul ICAE CEMAC")
 
 if st.button("🚀 Calculer l'ICAE CEMAC", type="primary", key="run_cemac"):
     filtered = {k: v for k, v in icae_dict.items() if k in pays_inclus}
@@ -201,45 +261,131 @@ if "cemac_result" not in st.session_state:
 
 result_df = st.session_state["cemac_result"]
 
-st.header("4. Résultats")
+st.header("5. Résultats")
 
-tab1, tab2, tab3 = st.tabs(["📈 ICAE mensuel", "📊 GA", "📋 Données"])
+# ── Fenêtre temporelle d'affichage des graphiques ────────────────────────
+st.subheader("📅 Fenêtre d'affichage des graphiques")
+_res_dates = pd.to_datetime(result_df.index)
+_res_min, _res_max = _res_dates.min(), _res_dates.max()
+
+_gc1, _gc2 = st.columns(2)
+with _gc1:
+    _graph_start = pd.Timestamp(st.date_input(
+        "Début d'affichage", value=_res_min.date(),
+        min_value=_res_min.date(), max_value=_res_max.date(),
+        key="cemac_graph_start",
+    ))
+with _gc2:
+    _graph_end = pd.Timestamp(st.date_input(
+        "Fin d'affichage", value=_res_max.date(),
+        min_value=_res_min.date(), max_value=_res_max.date(),
+        key="cemac_graph_end",
+    ))
+
+_graph_mask = (_res_dates >= _graph_start) & (_res_dates <= _graph_end)
+_disp_df = result_df[_graph_mask]
+
+tab1, tab2, tab3, tab4, tab5 = st.tabs([
+    "📈 ICAE mensuel", "📊 GA",
+    "📊 Contributions pays", "📋 Taux de croissance (8 trim.)",
+    "📋 Données",
+])
 
 with tab1:
     fig = chart_icae_monthly(
-        result_df.index, result_df["ICAE_CEMAC"],
+        _disp_df.index, _disp_df["ICAE_CEMAC"],
         title="ICAE CEMAC — Agrégé pondéré",
     )
     # Ajouter les pays
-    for code in pays_inclus:
-        if code in result_df.columns:
-            fig.add_scatter(x=result_df.index, y=result_df[code],
+    for code in COUNTRY_CODES:
+        if code in _disp_df.columns and code in pays_inclus:
+            fig.add_scatter(x=_disp_df.index, y=_disp_df[code],
                            mode="lines", name=COUNTRY_NAMES.get(code, code),
                            opacity=0.5)
     st.plotly_chart(fig, use_container_width=True)
 
 with tab2:
     fig_ga = chart_ga_bars(
-        result_df.index, result_df["GA"],
+        _disp_df.index, _disp_df["GA"],
         title="ICAE CEMAC — Glissement annuel (%)",
     )
     st.plotly_chart(fig_ga, use_container_width=True)
 
 with tab3:
+    # Graphique des contributions pays à la croissance CEMAC
+    import plotly.graph_objects as go
+    _poids_used = st.session_state.get("cemac_computed_poids", POIDS_PIB)
+    _country_colors = {
+        "CMR": "#4472C4", "RCA": "#ED7D31", "CNG": "#A5A5A5",
+        "GAB": "#FFC000", "GNQ": "#5B9BD5", "TCD": "#70AD47",
+    }
+    fig_contrib = go.Figure()
+    for code in COUNTRY_CODES:
+        if code in _disp_df.columns and code in pays_inclus:
+            # Contribution pays = poids * GA_pays
+            ga_pays = (_disp_df[code] / _disp_df[code].shift(12) - 1) * 100
+            contrib_pays = ga_pays * _poids_used.get(code, 0)
+            fig_contrib.add_trace(go.Bar(
+                x=_disp_df.index, y=contrib_pays,
+                name=f"{COUNTRY_NAMES.get(code, code)} ({round(_poids_used.get(code, 0) * 100, 1)}%)",
+                marker_color=_country_colors.get(code, "#888"),
+            ))
+    # Courbe GA CEMAC
+    fig_contrib.add_trace(go.Scatter(
+        x=_disp_df.index, y=_disp_df["GA"],
+        mode="lines+markers", name="GA CEMAC (%)",
+        line=dict(color="#C00000", width=3),
+    ))
+    fig_contrib.update_layout(
+        barmode="relative",
+        title="Contributions pays au GA de l'ICAE CEMAC (%)",
+        xaxis_title="Date", yaxis_title="Contribution / GA (%)",
+        template="plotly_white",
+        hovermode="x unified",
+        legend=dict(orientation="h", yanchor="bottom", y=-0.25,
+                    xanchor="center", x=0.5),
+    )
+    st.plotly_chart(fig_contrib, use_container_width=True)
+
+with tab4:
+    # Tableau de taux de croissance (GA) trimestriels sur les 8 derniers trimestres
+    dates_idx = pd.to_datetime(result_df.index)
+    q_cemac = quarterly_cemac(result_df, dates_idx)
+    st.session_state["cemac_quarterly"] = q_cemac
+
+    # Recalculer proprement les GA trimestriels par pays
+    ga_trim_data = {"Trimestre": q_cemac["Trimestre"].astype(str).tolist()}
+    for code in COUNTRY_CODES:
+        if code in q_cemac.columns:
+            ga_pays_t = (q_cemac[code] / q_cemac[code].shift(4) - 1) * 100
+            ga_trim_data[COUNTRY_NAMES.get(code, code)] = ga_pays_t.round(2).tolist()
+    ga_trim_data["CEMAC"] = q_cemac["GA_Trim"].round(2).tolist() if "GA_Trim" in q_cemac.columns else []
+
+    ga_trim_df = pd.DataFrame(ga_trim_data)
+    # Afficher les 8 derniers trimestres
+    n_show = min(8, len(ga_trim_df))
+    st.subheader("Taux de croissance trimestriels (GA, %)")
+    st.dataframe(ga_trim_df.tail(n_show), use_container_width=True, hide_index=True)
+
+with tab5:
     st.dataframe(result_df, use_container_width=True)
 
-# Trimestriel
+# Trimestriel complet
 st.subheader("Résultats trimestriels")
-dates_idx = pd.to_datetime(result_df.index)
-q_cemac = quarterly_cemac(result_df, dates_idx)
+if "cemac_quarterly" not in st.session_state:
+    dates_idx = pd.to_datetime(result_df.index)
+    q_cemac = quarterly_cemac(result_df, dates_idx)
+    st.session_state["cemac_quarterly"] = q_cemac
+q_cemac = st.session_state["cemac_quarterly"]
 st.dataframe(q_cemac, use_container_width=True, hide_index=True)
 
 # ── Export ────────────────────────────────────────────────────────────────
-st.header("5. Export")
+st.header("6. Export")
 if st.button("📥 Exporter CEMAC", key="export_cemac"):
     data = write_cemac_excel(
         result_df, q_cemac,
         st.session_state.get("cemac_computed_poids", POIDS_PIB),
+        template_path=CEMAC_TEMPLATE,
     )
     download_button(
         data,

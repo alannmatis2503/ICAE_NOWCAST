@@ -12,7 +12,7 @@ from ui.styles import inject_css
 from config import LOGO_PATH
 
 st.set_page_config(
-    page_title="ICAE — BEAC",
+    page_title="Suivi du secteur productif infra-annuel : ICAE et PIB Nowcast",
     page_icon="📊",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -24,7 +24,8 @@ inject_css()
 with st.sidebar:
     if LOGO_PATH.exists():
         st.image(str(LOGO_PATH), width=120)
-    st.title("ICAE — BEAC")
+    st.title("Suivi du secteur productif infra-annuel")
+    st.caption("ICAE et PIB Nowcast — BEAC")
     st.markdown("---")
 
 # ── Navigation ────────────────────────────────────────────────────────────

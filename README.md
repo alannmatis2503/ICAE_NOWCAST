@@ -1,5 +1,5 @@
 ---
-title: ICAE NOWCAST — BEAC
+title: Suivi du secteur productif infra-annuel - ICAE et PIB Nowcast
 emoji: 📊
 colorFrom: blue
 colorTo: indigo
@@ -10,9 +10,9 @@ pinned: false
 license: mit
 ---
 
-# ICAE NOWCAST — BEAC
+# Suivi du secteur productif infra-annuel : ICAE et PIB Nowcast
 
-Application Streamlit pour le calcul de l'**Indice Composite des Activités Économiques (ICAE)** des pays de la CEMAC, développée pour la Banque des États de l'Afrique Centrale (BEAC).
+Application Streamlit pour le suivi infra-annuel du secteur productif via l'**Indice Composite des Activités Économiques (ICAE)** et l'estimation en temps réel du PIB (Nowcast), développée pour la Banque des États de l'Afrique Centrale (BEAC).
 
 ## Fonctionnalités
 
