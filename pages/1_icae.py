@@ -126,7 +126,7 @@ if filepath is not None:
             value=consignes.get("base_year", 2023), key="base_year",
         )
     with col2:
-        sigma_mode = st.radio("Mode écart-type", ["Fixe", "Glissant"], key="sigma_mode")
+        sigma_mode = st.radio("Écart-type", ["Fixe", "Glissant"], key="sigma_mode")
     with col3:
         rolling_window = 12
         if sigma_mode == "Glissant":
@@ -305,6 +305,27 @@ _base_year = st.session_state.get("icae_base_year_dict", {}).get(country_code, 2
 
 st.header("5. Résultats")
 
+# ── Filtre de période pour les graphiques (slider start/end) ──────────────
+_all_dates = pd.to_datetime(results["dates"])
+_date_min, _date_max = _all_dates.min(), _all_dates.max()
+
+_col_s1, _col_s2 = st.columns(2)
+with _col_s1:
+    _chart_start = pd.Timestamp(st.date_input(
+        "📅 Début d'affichage", value=_date_min.date(),
+        min_value=_date_min.date(), max_value=_date_max.date(),
+        key="icae_chart_start"))
+with _col_s2:
+    _chart_end = pd.Timestamp(st.date_input(
+        "📅 Fin d'affichage", value=_date_max.date(),
+        min_value=_date_min.date(), max_value=_date_max.date(),
+        key="icae_chart_end"))
+
+_chart_mask = (_all_dates >= _chart_start) & (_all_dates <= _chart_end)
+_chart_dates = _all_dates[_chart_mask]
+_chart_icae = np.array(results["icae"])[_chart_mask]
+_chart_ga = np.array(results["ga_monthly"])[_chart_mask]
+
 tab1, tab2, tab3, tab4, tab5 = st.tabs([
     "📈 ICAE mensuel", "📊 GA mensuel",
     "📊 Trimestriel (GA + Contributions)", "🏗️ Contributions mensuelles",
@@ -313,15 +334,14 @@ tab1, tab2, tab3, tab4, tab5 = st.tabs([
 
 with tab1:
     fig = chart_icae_monthly(
-        results["dates"], results["icae"],
+        _chart_dates, _chart_icae,
         title=f"ICAE {country_code} — Base {_base_year} = 100",
     )
     st.plotly_chart(fig, use_container_width=True)
 
 with tab2:
-    ga = results["ga_monthly"]
     fig_ga = chart_ga_bars(
-        results["dates"], ga,
+        _chart_dates, _chart_ga,
         title=f"ICAE {country_code} — Glissement annuel mensuel (%)",
     )
     st.plotly_chart(fig_ga, use_container_width=True)
@@ -331,15 +351,26 @@ with tab3:
     q_data = st.session_state.get("icae_quarterly", {}).get(country_code)
     ct_data = st.session_state.get("icae_contrib_trim", {}).get(country_code)
     if q_data is not None and ct_data is not None:
-        trimestres = q_data["trimestre"].tolist()
-        ga_trim = q_data["GA_Trim"]
+        # Filtrer les trimestres selon la période sélectionnée
+        _q_trim = q_data["trimestre"].tolist()
+        _q_filter_mask = []
+        for t in _q_trim:
+            try:
+                p = pd.Period(t, freq="Q")
+                _q_filter_mask.append(p.start_time >= _chart_start and p.end_time <= _chart_end + pd.Timedelta(days=31))
+            except Exception:
+                _q_filter_mask.append(True)
+        _q_filtered = q_data[_q_filter_mask].reset_index(drop=True)
+        _ct_filtered = ct_data.iloc[:len(q_data)][_q_filter_mask].reset_index(drop=True) if len(ct_data) >= len(q_data) else ct_data
+
+        trimestres = _q_filtered["trimestre"].tolist()
+        ga_trim = _q_filtered["GA_Trim"]
         fig_qt = chart_quarterly_contrib_ga(
-            ct_data, ga_trim, trimestres,
+            _ct_filtered, ga_trim, trimestres,
             title=f"ICAE {country_code} — Contributions sectorielles et GA trimestriel (%)",
         )
         st.plotly_chart(fig_qt, use_container_width=True)
     elif q_data is not None:
-        # Pas de contributions, afficher juste la courbe GA
         import plotly.graph_objects as go
         fig_gt = go.Figure()
         fig_gt.add_trace(go.Scatter(
@@ -362,8 +393,14 @@ with tab4:
         contrib = contributions_sectorielles(
             results["weights"]["m"], codif_for, results["dates"],
         )
+        # Appliquer le filtre de période aux contributions mensuelles
+        _contrib_dates = pd.to_datetime(results["dates"])
+        _contrib_mask = (_contrib_dates >= _chart_start) & (_contrib_dates <= _chart_end)
+        _contrib_filtered = contrib[_contrib_mask.values].reset_index(drop=True)
+        _contrib_dates_filtered = _contrib_dates[_contrib_mask]
+
         fig_c = chart_contributions(
-            results["dates"], contrib,
+            _contrib_dates_filtered, _contrib_filtered,
             title=f"Contributions sectorielles mensuelles — {country_code}",
         )
         st.plotly_chart(fig_c, use_container_width=True)

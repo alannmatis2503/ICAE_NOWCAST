@@ -9,28 +9,30 @@ LIVRABLES = WORKSPACE / "Livrables"
 CONSOLIDES = LIVRABLES / "01_ICAE_Consolides_Corriges"
 CONSOLIDES_FC = LIVRABLES / "01_ICAE_Consolides_Corriges_with_forecast_by_series"
 PREVISIONS = LIVRABLES / "02_Previsions_Q1_2026"
+LIVRABLE_FINAL = WORKSPACE / "Livrable_Final" / "01_Classeurs_ICAE"
+CEMAC_TEMPLATE = LIVRABLE_FINAL / "ICAE_CEMAC_Consolide.xlsx"
 ASSETS = APP_DIR / "assets"
 LOGO_PATH = ASSETS / "logo_beac.jpg"
 
-# ── Pays ───────────────────────────────────────────────────────────────────
-COUNTRY_CODES = ["CMR", "CNG", "GAB", "GNQ", "RCA", "TCD"]
+# ── Pays (ordre BEAC : CMR, RCA, CNG, GAB, GNQ, TCD) ──────────────────────
+COUNTRY_CODES = ["CMR", "RCA", "CNG", "GAB", "GNQ", "TCD"]
 COUNTRY_NAMES = {
     "CMR": "Cameroun",
+    "RCA": "RCA",
     "CNG": "Congo",
     "GAB": "Gabon",
     "GNQ": "Guinée Équatoriale",
-    "RCA": "RCA",
     "TCD": "Tchad",
 }
 
-# Poids PIB 2014 (milliards FCFA)
+# Poids PIB 2014 (milliards FCFA) — source : ICAE_CEMAC_Consolide.xlsx
 PIB_2014 = {
-    "CMR": 13651.4,
-    "CNG": 5729.7,
-    "GAB": 6861.0,
-    "GNQ": 6413.3,
-    "RCA": 624.7,
-    "TCD": 4989.2,
+    "CMR": 22310.90,
+    "RCA": 830.35,
+    "CNG": 4346.14,
+    "GAB": 3297.98,
+    "GNQ": 5046.69,
+    "TCD": 8637.90,
 }
 PIB_TOTAL = sum(PIB_2014.values())
 POIDS_PIB = {k: v / PIB_TOTAL for k, v in PIB_2014.items()}
@@ -64,3 +66,32 @@ CLOUD_MODE = False
 
 # ── Modèles Nowcast ───────────────────────────────────────────────────────
 NOWCAST_MODELS = ["Bridge", "U-MIDAS", "PC", "DFM"]
+
+# ── Types d'agrégation par défaut pour les variables connues ──────────────
+# "sum" = Flux (somme), "mean" = Taux/Indice (moyenne), "last" = Stock (fin de période)
+# Clefs en minuscules partielles pour le matching par label.
+_STOCK_KEYWORDS = [
+    "monnaie", "m2", "masse monétaire", "masse mon",
+    "circulation fiduciaire", "crédit à l'économie", "crédit a l'economie",
+    "créances nettes", "creances_nettes", "crédit",
+    "inverse créances", "inverse_creances", "inverse du taux",
+]
+_RATE_KEYWORDS = [
+    "taux", "inverse", "ipc", "variation m2", "ratio",
+    "créances douteuses", "créances en souffrance",
+    "creances_douteuses", "taux_creances",
+]
+
+def get_default_agg_type(var_name: str) -> str:
+    """Retourne le type d'agrégation par défaut pour une variable.
+
+    Returns 'sum' (flux), 'mean' (taux/indice) ou 'last' (stock).
+    """
+    vl = var_name.lower()
+    for kw in _STOCK_KEYWORDS:
+        if kw in vl:
+            return "last"
+    for kw in _RATE_KEYWORDS:
+        if kw in vl:
+            return "mean"
+    return "sum"  # défaut = flux

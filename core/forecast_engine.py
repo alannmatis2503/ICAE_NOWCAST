@@ -150,13 +150,14 @@ def backtest_method(series: pd.Series, method_fn, h: int,
             errors.append((actual[0], pred[0]))
 
     if not errors:
-        return {"mape": np.nan, "rmse": np.nan}
+        return {"mape": np.nan, "rmse": np.nan, "mae": np.nan}
 
     actuals = np.array([e[0] for e in errors])
     preds = np.array([e[1] for e in errors])
     mape = np.mean(np.abs((actuals - preds) / actuals)) * 100
     rmse = np.sqrt(np.mean((actuals - preds) ** 2))
-    return {"mape": mape, "rmse": rmse}
+    mae = np.mean(np.abs(actuals - preds))
+    return {"mape": mape, "rmse": rmse, "mae": mae}
 
 
 # ────────────────────────────────────────────────────────────────────────────

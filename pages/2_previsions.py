@@ -9,10 +9,77 @@ from core.forecast_engine import (
     run_all_forecasts, get_methods_for_frequency, SEASON_MAP,
 )
 from core.tempdisagg import disaggregate_annual
-from io_utils.excel_reader import list_sheets, read_donnees_calcul, read_codification
-from io_utils.excel_writer import write_previsions_excel
+from io_utils.excel_reader import (
+    list_sheets, read_donnees_calcul, read_codification, rename_columns_to_codes,
+)
+from io_utils.excel_writer import write_previsions_excel, write_icae_recalc_output
 from ui.charts import chart_forecast_comparison
 from ui.components import download_button
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# Fonctions utilitaires (parsing dates multi-fréquence)
+# ────────────────────────────────────────────────────────────────────────────
+def _parse_quarterly_date(val):
+    """Parse '2024T1', '2024Q1', '2024-Q1' etc. en Timestamp."""
+    s = str(val).strip().upper()
+    for sep in ["T", "Q", "-Q", "-T"]:
+        if sep in s:
+            parts = s.split(sep[-1])
+            if len(parts) == 2:
+                try:
+                    year, q = int(parts[0].replace("-", "")), int(parts[1])
+                    month = (q - 1) * 3 + 1
+                    return pd.Timestamp(year=year, month=month, day=1)
+                except (ValueError, TypeError):
+                    pass
+    return pd.NaT
+
+
+def _future_dates(last_date, horizon, freq):
+    """Génère les dates futures selon la fréquence."""
+    last = pd.Timestamp(last_date)
+    if freq == "Mensuelle":
+        return pd.date_range(last + pd.DateOffset(months=1),
+                             periods=horizon, freq="MS")
+    elif freq == "Trimestrielle":
+        return pd.date_range(last + pd.DateOffset(months=3),
+                             periods=horizon, freq="QS")
+    else:  # Annuelle
+        return pd.date_range(last + pd.DateOffset(years=1),
+                             periods=horizon, freq="YS")
+
+
+def _format_dates(dates, freq):
+    """Formate les dates pour l'affichage selon la fréquence."""
+    if freq == "Mensuelle":
+        return dates.strftime("%Y-%m")
+    elif freq == "Trimestrielle":
+        return [f"{d.year}T{(d.month - 1) // 3 + 1}" for d in dates]
+    else:
+        return dates.strftime("%Y")
+
+
+def _get_active_vars(codif_df, available_cols):
+    """Extrait les variables actives depuis la Codification (PRIOR > 0, Statut Actif)."""
+    if codif_df is None:
+        return None
+    if "Code" not in codif_df.columns or "PRIOR" not in codif_df.columns:
+        return None
+    active_names = set()
+    for _, row in codif_df.iterrows():
+        try:
+            if float(row.get("PRIOR", 0)) > 0:
+                statut = str(row.get("Statut", "Actif")).lower()
+                if not statut.startswith("inact"):
+                    active_names.add(str(row["Code"]))
+                    if "Label" in codif_df.columns and pd.notna(row.get("Label")):
+                        active_names.add(str(row["Label"]))
+        except (ValueError, TypeError):
+            pass
+    filtered = [c for c in available_cols if c in active_names]
+    return filtered if filtered else None
+
 
 st.title("📈 Module 2 — Prévisions")
 
@@ -172,12 +239,17 @@ if not CLOUD_MODE:
 source = st.radio("Source", source_opts, horizontal=True, key="prev_source")
 
 donnees = None
+codif_df = None
 country = "XXX"
 
 if source == "Données du Module 1" and has_session_data:
     available_countries = list(st.session_state["donnees_calcul"].keys())
     country = st.selectbox("Pays", available_countries, key="prev_country")
     donnees = st.session_state["donnees_calcul"][country]
+    _codif_store = st.session_state.get("codification", {})
+    if country in _codif_store:
+        codif_df = _codif_store[country]
+    st.session_state["prev_source_path"] = st.session_state.get("icae_filepath")
 elif source == "Upload d'un fichier":
     uploaded = st.file_uploader("Fichier Excel (.xlsx)", type=["xlsx"],
                                 key="prev_upload")
@@ -219,11 +291,33 @@ elif source == "Upload d'un fichier":
 
     donnees = df
 
+    # Lire la Codification si disponible dans le même classeur
+    uploaded.seek(0)
+    _up_sheets = list_sheets(uploaded)
+    uploaded.seek(0)
+    if "Codification" in _up_sheets:
+        try:
+            codif_df = read_codification(uploaded)
+            uploaded.seek(0)
+        except Exception:
+            pass
+
     for c in COUNTRY_CODES:
         if c in uploaded.name.upper():
             country = c
             break
-else:
+
+    st.session_state["prev_source_path"] = uploaded
+
+    # Stocker la codification en session et renommer les colonnes si possible
+    if codif_df is not None and country != "XXX":
+        st.session_state.setdefault("codification", {})[country] = codif_df
+        # Renommer les colonnes vers les codes si la codification est disponible
+        try:
+            donnees = rename_columns_to_codes(donnees, codif_df)
+        except Exception:
+            pass
+elif source == "Fichier du dossier Livrables":
     # Fichier du dossier Livrables
     available = []
     if CONSOLIDES.exists():
@@ -240,24 +334,90 @@ else:
                              if "Donnees_calcul" in sheets else 0,
                              key="prev_sheet_loc")
         donnees = read_donnees_calcul(filepath, sheet=sheet)
+        if "Codification" in sheets:
+            try:
+                codif_df = read_codification(filepath)
+            except Exception:
+                pass
         for c in COUNTRY_CODES:
             if c in selected.upper():
                 country = c
                 break
+        st.session_state["prev_source_path"] = filepath
+        # Stocker la codification et renommer les colonnes
+        if codif_df is not None and country != "XXX":
+            st.session_state.setdefault("codification", {})[country] = codif_df
+            try:
+                donnees = rename_columns_to_codes(donnees, codif_df)
+            except Exception:
+                pass
     else:
         st.warning("Aucun fichier trouvé dans le dossier Livrables.")
 
 if donnees is None:
     st.stop()
 
-# Afficher un aperçu
+# ── Aperçu et période ────────────────────────────────────────────────────
+data_cols = [c for c in donnees.columns if c != "Date"]
 st.dataframe(donnees.head(10), use_container_width=True)
-st.caption(f"{len(donnees)} observations × {len(donnees.columns) - 1} variables")
+st.caption(f"{len(donnees)} observations × {len(data_cols)} variables")
+
+# Sélection de la période
+dates_series = pd.to_datetime(donnees["Date"], errors="coerce")
+var_ranges = {}
+for col in data_cols:
+    valid_idx = donnees[col].notna() & dates_series.notna()
+    valid_dates = dates_series[valid_idx]
+    if len(valid_dates) > 0:
+        var_ranges[col] = (valid_dates.min(), valid_dates.max())
+
+if var_ranges:
+    common_start = max(r[0] for r in var_ranges.values())
+    common_end = min(r[1] for r in var_ranges.values())
+    total_start = min(r[0] for r in var_ranges.values())
+    total_end = max(r[1] for r in var_ranges.values())
+
+    if common_start > common_end:
+        st.warning("⚠️ Aucune période commune — période totale utilisée.")
+        common_start, common_end = total_start, total_end
+
+    with st.expander("📅 Période des données", expanded=True):
+        st.caption(
+            f"Période commune : **{common_start.strftime('%Y-%m')}** — "
+            f"**{common_end.strftime('%Y-%m')}** | "
+            f"Totale : {total_start.strftime('%Y-%m')} — {total_end.strftime('%Y-%m')}"
+        )
+        pc1, pc2 = st.columns(2)
+        with pc1:
+            start_date = st.date_input(
+                "Début", value=common_start.date(),
+                min_value=total_start.date(), max_value=total_end.date(),
+                key="prev_start_date",
+            )
+        with pc2:
+            end_date = st.date_input(
+                "Fin", value=common_end.date(),
+                min_value=total_start.date(), max_value=total_end.date(),
+                key="prev_end_date",
+            )
+        mask = (dates_series >= pd.Timestamp(start_date)) & (
+            dates_series <= pd.Timestamp(end_date)
+        )
+        donnees = donnees[mask].reset_index(drop=True)
+        data_cols = [c for c in donnees.columns if c != "Date"]
+        st.caption(f"✅ {len(donnees)} observations retenues")
+
+if donnees.empty:
+    st.warning("Aucune observation dans la période sélectionnée.")
+    st.stop()
+
+# ── Variables actives ────────────────────────────────────────────────────
+active_vars = _get_active_vars(codif_df, data_cols)
+has_codif = active_vars is not None
 
 # ── Paramètres ────────────────────────────────────────────────────────────
 st.header("2. Paramètres de prévision")
 
-data_cols = [c for c in donnees.columns if c != "Date"]
 available_methods = get_methods_for_frequency(freq)
 
 freq_labels = {"Mensuelle": "mois", "Trimestrielle": "trimestres", "Annuelle": "années"}
@@ -280,11 +440,19 @@ with col2:
         default=default_methods,
         key="prev_methods",
     )
-    var_mode = st.radio("Variables à prévoir", ["Toutes", "Sélection manuelle"],
-                        key="prev_var_mode")
+    var_options = (
+        ["Variables actives (Codification)", "Toutes", "Sélection manuelle"]
+        if has_codif
+        else ["Toutes", "Sélection manuelle"]
+    )
+    var_mode = st.radio("Variables à prévoir", var_options, key="prev_var_mode")
 
-if var_mode == "Sélection manuelle":
-    selected_vars = st.multiselect("Variables", data_cols, default=data_cols[:5],
+if var_mode == "Variables actives (Codification)":
+    selected_vars = active_vars
+    st.info(f"🎯 {len(selected_vars)} variables actives depuis la Codification")
+elif var_mode == "Sélection manuelle":
+    default_sel = active_vars[:10] if has_codif else data_cols[:5]
+    selected_vars = st.multiselect("Variables", data_cols, default=default_sel,
                                    key="prev_vars")
 else:
     selected_vars = data_cols
@@ -311,11 +479,11 @@ if st.button("🚀 Lancer les prévisions", type="primary", key="run_prev"):
         progress.progress((i + 1) / len(selected_vars))
 
     st.session_state["prev_results"] = all_results
-    st.session_state["prev_country"] = country
-    st.session_state["prev_horizon"] = horizon
-    st.session_state["prev_methods"] = methods
-    st.session_state["prev_freq"] = freq
-    st.session_state["prev_donnees"] = donnees
+    st.session_state["prev_country_out"] = country
+    st.session_state["prev_horizon_out"] = horizon
+    st.session_state["prev_methods_out"] = methods
+    st.session_state["prev_freq_out"] = freq
+    st.session_state["prev_donnees_out"] = donnees
     st.success(f"✅ Prévisions calculées pour {len(all_results)} variables")
 
 # ── Résultats interactifs ────────────────────────────────────────────────
@@ -323,10 +491,10 @@ if "prev_results" not in st.session_state:
     st.stop()
 
 all_results = st.session_state["prev_results"]
-horizon = st.session_state.get("prev_horizon", 3)
-methods = st.session_state.get("prev_methods", available_methods[:6])
-prev_freq = st.session_state.get("prev_freq", freq)
-donnees = st.session_state.get("prev_donnees", donnees)
+horizon = st.session_state.get("prev_horizon_out", 3)
+methods = st.session_state.get("prev_methods_out", available_methods[:6])
+prev_freq = st.session_state.get("prev_freq_out", freq)
+donnees = st.session_state.get("prev_donnees_out", donnees)
 
 st.header("4. Résultats et sélection de méthode")
 
@@ -336,15 +504,22 @@ tab_compare, tab_graph, tab_edit = st.tabs([
 ])
 
 with tab_compare:
-    st.subheader("MAPE par méthode et variable")
+    # Onglet de sélection MAPE / MAE / RMSE
+    metric_choice = st.radio(
+        "Critère de comparaison", ["MAPE", "MAE", "RMSE"],
+        horizontal=True, key="prev_metric_choice",
+    )
+    metric_key = metric_choice.lower()
+
+    st.subheader(f"{metric_choice} par méthode et variable")
 
     compare_rows = []
     for var, res in all_results.items():
         row = {"Variable": var}
         for m in methods:
             if m in res["backtesting"]:
-                row[m] = round(res["backtesting"][m]["mape"], 2) \
-                    if not np.isnan(res["backtesting"][m]["mape"]) else None
+                val = res["backtesting"][m].get(metric_key, np.nan)
+                row[m] = round(val, 2) if not np.isnan(val) else None
         row["Recommandée"] = res["best_method"]
         compare_rows.append(row)
 
@@ -416,8 +591,9 @@ with tab_graph:
         st.plotly_chart(fig, use_container_width=True)
 
         metrics_df = pd.DataFrame([
-            {"Méthode": m, "MAPE": res["backtesting"][m]["mape"],
-             "RMSE": res["backtesting"][m]["rmse"]}
+            {"M\u00e9thode": m, "MAPE": round(res["backtesting"][m].get("mape", np.nan), 2),
+             "MAE": round(res["backtesting"][m].get("mae", np.nan), 2),
+             "RMSE": round(res["backtesting"][m].get("rmse", np.nan), 2)}
             for m in methods if m in res["backtesting"]
         ])
         st.dataframe(metrics_df, use_container_width=True, hide_index=True)
@@ -427,6 +603,19 @@ with tab_edit:
 
     last_date = pd.to_datetime(donnees["Date"]).max()
     dates_fcst = _future_dates(last_date, horizon, prev_freq)
+
+    # ── Contexte historique : 15 dernières périodes (lecture seule) ───────
+    n_hist_ctx = min(15, len(donnees))
+    _hist_vars = [v for v in all_results.keys() if v in donnees.columns]
+    if _hist_vars:
+        _hist_display = donnees.tail(n_hist_ctx)[["Date"] + _hist_vars].copy()
+        _hist_display["Date"] = _format_dates(
+            pd.to_datetime(_hist_display["Date"]), prev_freq
+        )
+        _hist_display = _hist_display.reset_index(drop=True)
+        st.caption("📋 **Contexte historique** — 15 dernières périodes (lecture seule)")
+        st.dataframe(_hist_display, use_container_width=True, hide_index=True)
+    st.caption("✏️ **Prévisions à éditer** — modifiez les valeurs ci-dessous")
 
     # Construire le tableau éditable
     edit_data = {"Date": _format_dates(dates_fcst, prev_freq)}
@@ -449,9 +638,10 @@ with tab_edit:
 # ── Réinjection ──────────────────────────────────────────────────────────
 st.header("5. Réinjection des prévisions")
 
-col1, col2, col3 = st.columns(3)
+col1, col2, col3, col4 = st.columns(4)
 with col1:
-    if st.button("✅ Valider les prévisions", key="validate_prev"):
+    if st.button("✅ Valider et recalculer l'ICAE", key="validate_prev",
+                 type="primary"):
         edited = st.session_state.get("forecasts_edited", {}).get(country)
         if edited is not None:
             last_date = pd.to_datetime(donnees["Date"]).max()
@@ -466,15 +656,109 @@ with col1:
                 st.session_state["donnees_calcul"] = {}
             st.session_state["donnees_calcul"][country] = extended
             st.session_state["forecasts"] = {country: edited}
-            st.success("✅ Prévisions ajoutées aux séries")
+
+            # Auto-recalcul de l'ICAE en arrière-plan si fréquence mensuelle
+            if prev_freq == "Mensuelle" and country != "XXX":
+                try:
+                    from core.icae_engine import run_icae_pipeline
+                    from core.quarterly import (
+                        quarterly_mean, calc_ga_trim, calc_gt_trim,
+                        contributions_sectorielles_trim, normalize_contrib_to_ga,
+                    )
+
+                    _codif = st.session_state.get("codification", {}).get(country)
+                    _base_year = st.session_state.get("icae_base_year_dict", {}).get(country, 2023)
+
+                    dates_c = pd.to_datetime(extended["Date"])
+                    base_mask = dates_c.dt.year == _base_year
+                    base_indices = extended.index[base_mask]
+                    if len(base_indices) > 0:
+                        base_rows = range(base_indices[0], base_indices[-1] + 1)
+                    else:
+                        base_rows = range(108, 120)
+
+                    data_cols_ext = [c for c in extended.columns if c != "Date"]
+                    priors = pd.Series(1.0, index=data_cols_ext)
+                    if _codif is not None and "Code" in _codif.columns and "PRIOR" in _codif.columns:
+                        priors = pd.Series(
+                            _codif["PRIOR"].values, index=_codif["Code"].values, dtype=float
+                        ).fillna(0)
+
+                    results_icae = run_icae_pipeline(
+                        donnees=extended, priors=priors,
+                        base_year=_base_year, base_rows=base_rows,
+                    )
+                    q = quarterly_mean(results_icae["icae"], results_icae["dates"])
+                    q["GA_Trim"] = calc_ga_trim(q["icae_trim"])
+                    q["GT_Trim"] = calc_gt_trim(q["icae_trim"])
+
+                    contrib_trim = None
+                    if "m" in results_icae["weights"]:
+                        codif_for_contrib = _codif
+                        # Si pas de codification, tenter de créer un pseudo-codif
+                        if codif_for_contrib is None:
+                            codif_for_contrib = pd.DataFrame({
+                                "Code": results_icae["active_cols"],
+                                "Secteur": "Autre",
+                            })
+                        contrib_trim = contributions_sectorielles_trim(
+                            results_icae["weights"]["m"], codif_for_contrib,
+                            results_icae["dates"],
+                        )
+                        if contrib_trim is not None:
+                            contrib_trim = normalize_contrib_to_ga(
+                                contrib_trim, q["GA_Trim"],
+                            )
+
+                    # Stocker tout en session state pour partage inter-modules
+                    st.session_state["icae_results"] = results_icae
+                    st.session_state["icae_country"] = country
+                    st.session_state.setdefault("icae_monthly", {})[country] = results_icae["icae"]
+                    st.session_state.setdefault("icae_quarterly", {})[country] = q
+                    st.session_state.setdefault("icae_base_year_dict", {})[country] = _base_year
+                    if contrib_trim is not None:
+                        st.session_state.setdefault("icae_contrib_trim", {})[country] = contrib_trim
+
+                    # Stocker le classeur complet recalculé pour partage
+                    _recalc_wb = write_icae_recalc_output(
+                        source_path=st.session_state.get("prev_source_path"),
+                        donnees=extended,
+                        results=results_icae,
+                        quarterly=q,
+                        contrib_trim=contrib_trim,
+                        codification=_codif,
+                        country_code=country,
+                    )
+                    st.session_state["_recalc_workbook"] = {country: _recalc_wb}
+
+                    st.success("✅ Prévisions validées et ICAE recalculé automatiquement !")
+                except Exception as e:
+                    st.warning(f"Prévisions validées mais recalcul ICAE échoué : {e}")
+                    import traceback
+                    st.code(traceback.format_exc())
+            else:
+                st.success("✅ Prévisions validées")
 
 with col2:
-    if prev_freq == "Mensuelle":
-        if st.button("→ Recalculer l'ICAE", key="goto_icae"):
-            st.switch_page("pages/1_icae.py")
+    # Bouton téléchargement du classeur ICAE recalculé
+    _recalc_wb = st.session_state.get("_recalc_workbook", {}).get(country)
+    if _recalc_wb is not None:
+        download_button(
+            _recalc_wb,
+            f"ICAE_{country}_Recalcule_Series_Prolongees.xlsx",
+            "📥 Télécharger l'ICAE recalculé",
+        )
+    else:
+        st.button("📥 Télécharger l'ICAE recalculé", disabled=True,
+                  key="download_recalc_disabled")
 
 with col3:
+    if st.button("📋 Aller au module Rapports", key="goto_rapports"):
+        st.switch_page("pages/5_rapports.py")
+
+with col4:
     if st.button("→ Nowcast avec séries prolongées", key="goto_nowcast"):
+        st.session_state["_nowcast_use_extended"] = True
         st.switch_page("pages/3_nowcast.py")
 
 # ── Export ────────────────────────────────────────────────────────────────
@@ -507,46 +791,3 @@ if st.button("📥 Générer le fichier de prévisions", key="export_prev"):
         f"Prevision_{country}_{freq_tag}_Q{(pd.Timestamp.now().month - 1) // 3 + 1}_{pd.Timestamp.now().year}.xlsx",
         "📥 Télécharger les prévisions",
     )
-
-
-# ────────────────────────────────────────────────────────────────────────────
-# Fonctions utilitaires (parsing dates multi-fréquence)
-# ────────────────────────────────────────────────────────────────────────────
-def _parse_quarterly_date(val):
-    """Parse '2024T1', '2024Q1', '2024-Q1' etc. en Timestamp."""
-    s = str(val).strip().upper()
-    for sep in ["T", "Q", "-Q", "-T"]:
-        if sep in s:
-            parts = s.split(sep[-1])
-            if len(parts) == 2:
-                try:
-                    year, q = int(parts[0].replace("-", "")), int(parts[1])
-                    month = (q - 1) * 3 + 1
-                    return pd.Timestamp(year=year, month=month, day=1)
-                except (ValueError, TypeError):
-                    pass
-    return pd.NaT
-
-
-def _future_dates(last_date, horizon, freq):
-    """Génère les dates futures selon la fréquence."""
-    last = pd.Timestamp(last_date)
-    if freq == "Mensuelle":
-        return pd.date_range(last + pd.DateOffset(months=1),
-                             periods=horizon, freq="MS")
-    elif freq == "Trimestrielle":
-        return pd.date_range(last + pd.DateOffset(months=3),
-                             periods=horizon, freq="QS")
-    else:  # Annuelle
-        return pd.date_range(last + pd.DateOffset(years=1),
-                             periods=horizon, freq="YS")
-
-
-def _format_dates(dates, freq):
-    """Formate les dates pour l'affichage selon la fréquence."""
-    if freq == "Mensuelle":
-        return dates.strftime("%Y-%m")
-    elif freq == "Trimestrielle":
-        return [f"{d.year}T{(d.month - 1) // 3 + 1}" for d in dates]
-    else:
-        return dates.strftime("%Y")

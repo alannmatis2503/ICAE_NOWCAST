@@ -210,7 +210,7 @@ def _build_sector_commentary(drivers, drags) -> str:
     parts = []
     if drivers:
         names = [_sector_synonym(d[0]) for d in drivers]
-        contribs = [f"+{d[1]} pp" for d in drivers]
+        contribs = [f"+{d[1]} %" for d in drivers]
         if len(names) == 1:
             parts.append(f"Cette évolution a été principalement tirée par "
                          f"{names[0]} ({contribs[0]})")
@@ -220,7 +220,7 @@ def _build_sector_commentary(drivers, drags) -> str:
                          f"({', '.join(contribs)})")
     if drags:
         names = [_sector_synonym(d[0]) for d in drags]
-        contribs = [f"{d[1]} pp" for d in drags]
+        contribs = [f"{d[1]} %" for d in drags]
         if parts:
             if len(names) == 1:
                 parts.append(f", tandis que {names[0]} ({contribs[0]}) "
@@ -360,6 +360,32 @@ if report_type == "Note ICAE (CEMAC ou Pays)":
         if entity == "CEMAC":
             if "cemac_quarterly" in st.session_state:
                 q_data = st.session_state["cemac_quarterly"]
+                # Harmoniser le nom de la colonne trimestre (CEMAC utilise "Trimestre")
+                if "Trimestre" in q_data.columns and "trimestre" not in q_data.columns:
+                    q_data = q_data.rename(columns={"Trimestre": "trimestre"})
+                # S'assurer que GA_Trim existe
+                if "GA_Trim" not in q_data.columns and "ICAE_CEMAC" in q_data.columns:
+                    q_data["GA_Trim"] = (
+                        q_data["ICAE_CEMAC"] / q_data["ICAE_CEMAC"].shift(4) - 1
+                    ) * 100
+                if "GT_Trim" not in q_data.columns and "ICAE_CEMAC" in q_data.columns:
+                    q_data["GT_Trim"] = (
+                        q_data["ICAE_CEMAC"] / q_data["ICAE_CEMAC"].shift(1) - 1
+                    ) * 100
+                if "icae_trim" not in q_data.columns and "ICAE_CEMAC" in q_data.columns:
+                    q_data["icae_trim"] = q_data["ICAE_CEMAC"]
+                # Construire les contributions par pays comme proxy de contributions sectorielles
+                _poids_used = st.session_state.get("cemac_computed_poids", {})
+                if _poids_used:
+                    _cemac_ct_cols = []
+                    for code in COUNTRY_CODES:
+                        if code in q_data.columns:
+                            ga_pays = (q_data[code] / q_data[code].shift(4) - 1) * 100
+                            col_name = COUNTRY_NAMES.get(code, code)
+                            q_data[col_name] = ga_pays * _poids_used.get(code, 0)
+                            _cemac_ct_cols.append(col_name)
+                    if _cemac_ct_cols and ct_data is None:
+                        ct_data = q_data[["trimestre"] + _cemac_ct_cols].copy()
             elif "cemac_result" in st.session_state:
                 st.info(
                     "Les résultats CEMAC sont disponibles mais sans détail "
@@ -381,8 +407,22 @@ if report_type == "Note ICAE (CEMAC ou Pays)":
             st.session_state.get("icae_forecast_boundary") or {}
         ).get(entity)
 
+    # Harmoniser le nom de la colonne trimestre pour toutes les sources
+    if "trimestre" not in q_data.columns:
+        for candidate in ["Trimestre", "quarter", "Quarter", "TRIMESTRE"]:
+            if candidate in q_data.columns:
+                q_data = q_data.rename(columns={candidate: "trimestre"})
+                break
+        else:
+            # Dernière tentative : construire la colonne trimestre
+            if q_data.index.dtype == "period[Q-DEC]":
+                q_data["trimestre"] = q_data.index.astype(str)
+            else:
+                st.error("Colonne 'trimestre' introuvable dans les données trimestrielles.")
+                st.stop()
+
     # Construire les listes de trimestres disponibles
-    trimestres_list = q_data["trimestre"].tolist()
+    trimestres_list = q_data["trimestre"].astype(str).tolist()
 
     # ── Choix des trimestres ──────────────────────────────────────────────
     st.markdown("---")

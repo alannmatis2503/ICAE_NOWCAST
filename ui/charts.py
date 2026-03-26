@@ -43,25 +43,19 @@ def chart_icae_monthly(dates, icae, title="ICAE mensuel",
 
 def chart_ga_bars(dates, ga, title="Glissement annuel (%)",
                   fcst_start=None):
-    """Barres de glissement annuel."""
+    """Courbe de glissement annuel avec zone positive/négative."""
     fig = go.Figure()
     dates = pd.to_datetime(dates) if not isinstance(dates, pd.DatetimeIndex) else dates
     ga_arr = np.array(ga, dtype=float)
 
-    colors = []
-    for i, d in enumerate(dates):
-        if fcst_start and d >= pd.Timestamp(fcst_start):
-            colors.append(COLOR_FCST)
-        elif ga_arr[i] >= 0:
-            colors.append(COLOR_HIST)
-        else:
-            colors.append("#C00000")
-
-    fig.add_trace(go.Bar(
+    fig.add_trace(go.Scatter(
         x=dates, y=ga_arr,
-        marker_color=colors,
+        mode="lines",
         name="GA (%)",
+        line=dict(color=COLOR_HIST, width=2),
+        fill="tozeroy",
     ))
+    fig.add_hline(y=0, line_dash="dash", line_color="grey", line_width=1)
     fig.update_layout(
         title=title,
         xaxis_title="Date", yaxis_title="GA (%)",
@@ -143,11 +137,22 @@ def chart_forecast_comparison(series, forecasts, selected_method,
         line=dict(color=COLOR_HIST, width=2),
     ))
 
-    # Prévisions par méthode
+    # Dernier point historique pour juxtaposition
+    last_hist_date = dates_hist[-1] if len(dates_hist) > 0 else None
+    last_hist_val = series[-1] if len(series) > 0 else None
+
+    # Prévisions par méthode — connectées au dernier point historique
     for method, values in forecasts.items():
         is_selected = method == selected_method
+        # Juxtaposer : on ajoute le dernier point historique au début de la courbe
+        if last_hist_date is not None and last_hist_val is not None:
+            x_vals = np.concatenate([[last_hist_date], dates_fcst])
+            y_vals = np.concatenate([[last_hist_val], values])
+        else:
+            x_vals = dates_fcst
+            y_vals = values
         fig.add_trace(go.Scatter(
-            x=dates_fcst, y=values,
+            x=x_vals, y=y_vals,
             mode="lines+markers", name=method,
             line=dict(
                 color=method_colors.get(method, "#888"),

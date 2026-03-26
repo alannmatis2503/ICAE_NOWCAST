@@ -16,21 +16,63 @@ def _safe_ols(X: np.ndarray, y: np.ndarray):
         return None
 
 
-def _prepare_data(pib_q: pd.Series, hf_q: pd.DataFrame,
-                  h_ahead: int = 4) -> dict:
-    """Prépare les données communes pour tous les modèles."""
-    # Aligner PIB et HF par quarter
-    common = pib_q.dropna().index.intersection(hf_q.index)
-    if len(common) < 10:
-        return None
+def _idx_to_qkey(idx) -> list[str]:
+    """Convertit n'importe quel index trimestriel en clés 'YYYYQn'."""
+    keys = []
+    for v in idx:
+        if hasattr(v, 'year') and hasattr(v, 'quarter'):
+            keys.append(f"{v.year}Q{v.quarter}")
+        else:
+            try:
+                p = pd.Timestamp(v).to_period('Q')
+                keys.append(f"{p.year}Q{p.quarter}")
+            except Exception:
+                keys.append(str(v))
+    return keys
 
-    pib = pib_q.loc[common].values.astype(float)
-    hf = hf_q.loc[common].copy()
+
+def _prepare_data(pib_q: pd.Series, hf_q: pd.DataFrame,
+                  h_ahead: int = 4) -> dict | str:
+    """Prépare les données communes pour tous les modèles.
+
+    Aligne PIB et HF sur la fenêtre temporelle commune en utilisant
+    des clés texte 'YYYYQn' pour éviter tout problème d'index.
+    Retourne un dict ou un message d'erreur (str) si pas de fenêtre commune.
+    """
+    # ── Construire un DataFrame PIB avec clé texte ──
+    pib_df = pd.DataFrame({
+        '_qkey': _idx_to_qkey(pib_q.index),
+        '_pib': pib_q.values,
+    })
+    pib_df['_pib'] = pd.to_numeric(pib_df['_pib'], errors='coerce')
+    pib_df = pib_df.dropna(subset=['_pib']).drop_duplicates(subset='_qkey', keep='last')
+
+    # ── Construire un DataFrame HF avec clé texte ──
+    hf_temp = hf_q.copy()
+    hf_temp['_qkey'] = _idx_to_qkey(hf_q.index)
+    hf_temp = hf_temp.drop_duplicates(subset='_qkey', keep='last')
+
+    # ── Fenêtre temporelle commune (inner join) ──
+    merged = pib_df.merge(hf_temp, on='_qkey', how='inner')
+
+    if len(merged) == 0:
+        return ("Aucune fenêtre temporelle commune entre le PIB "
+                f"({pib_df['_qkey'].iloc[0]}–{pib_df['_qkey'].iloc[-1]}) "
+                f"et les HF ({hf_temp['_qkey'].iloc[0]}–{hf_temp['_qkey'].iloc[-1]}).")
+    if len(merged) < 10:
+        return (f"Fenêtre commune trop courte ({len(merged)} trimestres, "
+                f"minimum requis : 10). PIB : {pib_df['_qkey'].iloc[0]}–"
+                f"{pib_df['_qkey'].iloc[-1]}, HF : {hf_temp['_qkey'].iloc[0]}–"
+                f"{hf_temp['_qkey'].iloc[-1]}.")
+
+    pib = merged['_pib'].values.astype(float)
+    qkeys = merged['_qkey'].values
+    hf = merged.drop(columns=['_qkey', '_pib'])
 
     # Supprimer les colonnes constantes
     hf = hf.loc[:, hf.std() > 0]
     if hf.shape[1] == 0:
-        return None
+        return "Toutes les variables HF sont constantes sur la fenêtre commune."
 
     # Imputer les NA par la moyenne
     hf = hf.fillna(hf.mean())
@@ -38,8 +80,11 @@ def _prepare_data(pib_q: pd.Series, hf_q: pd.DataFrame,
     n = len(pib)
     n_train = max(n - h_ahead, 10)
 
+    # Index PeriodIndex pour les résultats
+    index = pd.PeriodIndex([pd.Period(q, 'Q') for q in qkeys])
+
     return {"pib": pib, "hf": hf, "n": n, "n_train": n_train,
-            "index": common}
+            "index": index}
 
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -49,8 +94,9 @@ def fit_bridge(pib_q: pd.Series, hf_q: pd.DataFrame,
                h_ahead: int = 4) -> dict:
     """Bridge : PC1 + 2 meilleurs indicateurs (retardés)."""
     data = _prepare_data(pib_q, hf_q, h_ahead)
-    if data is None:
-        return {"forecast": pd.Series(dtype=float), "name": "Bridge"}
+    if not isinstance(data, dict):
+        return {"forecast": pd.Series(dtype=float), "name": "Bridge",
+                "error": data or "Données insuffisantes"}
 
     pib, hf, n, n_train = data["pib"], data["hf"], data["n"], data["n_train"]
 
@@ -100,8 +146,9 @@ def fit_umidas(pib_q: pd.Series, hf_q: pd.DataFrame,
                h_ahead: int = 4) -> dict:
     """U-MIDAS : meilleur HF + 2 retards."""
     data = _prepare_data(pib_q, hf_q, h_ahead)
-    if data is None:
-        return {"forecast": pd.Series(dtype=float), "name": "U-MIDAS"}
+    if not isinstance(data, dict):
+        return {"forecast": pd.Series(dtype=float), "name": "U-MIDAS",
+                "error": data or "Données insuffisantes"}
 
     pib, hf, n, n_train = data["pib"], data["hf"], data["n"], data["n_train"]
 
@@ -144,8 +191,9 @@ def fit_pc(pib_q: pd.Series, hf_q: pd.DataFrame,
            h_ahead: int = 4, n_components: int = 3) -> dict:
     """Régression sur les composantes principales."""
     data = _prepare_data(pib_q, hf_q, h_ahead)
-    if data is None:
-        return {"forecast": pd.Series(dtype=float), "name": "PC"}
+    if not isinstance(data, dict):
+        return {"forecast": pd.Series(dtype=float), "name": "PC",
+                "error": data or "Données insuffisantes"}
 
     pib, hf, n, n_train = data["pib"], data["hf"], data["n"], data["n_train"]
 
@@ -172,8 +220,9 @@ def fit_dfm(pib_q: pd.Series, hf_q: pd.DataFrame,
             h_ahead: int = 4) -> dict:
     """DFM-lite : PC1 + lag(PC1) → PIB."""
     data = _prepare_data(pib_q, hf_q, h_ahead)
-    if data is None:
-        return {"forecast": pd.Series(dtype=float), "name": "DFM"}
+    if not isinstance(data, dict):
+        return {"forecast": pd.Series(dtype=float), "name": "DFM",
+                "error": data or "Données insuffisantes"}
 
     pib, hf, n, n_train = data["pib"], data["hf"], data["n"], data["n_train"]
 
@@ -255,6 +304,7 @@ def run_nowcast(pib_q: pd.Series, hf_q: pd.DataFrame,
         models = list(MODEL_DISPATCH.keys())
 
     results = {}
+    errors = []
     for name in models:
         fn = MODEL_DISPATCH[name]
         if name == "PC":
@@ -262,20 +312,34 @@ def run_nowcast(pib_q: pd.Series, hf_q: pd.DataFrame,
         else:
             res = fn(pib_q, hf_q, h_ahead)
 
+        if "error" in res:
+            errors.append(f"{name}: {res['error']}")
+
         metrics = compute_ins_out_metrics(pib_q, res["forecast"], h_test)
         results[name] = {
             "forecast": res["forecast"],
             "metrics": metrics,
         }
 
-    # Corrélations
+    # Corrélations — utilisation de _idx_to_qkey pour un alignement sûr
     for name, r in results.items():
         fc = r["forecast"]
-        common = pib_q.dropna().index.intersection(fc.dropna().index)
-        if len(common) >= 3:
-            corr = np.corrcoef(pib_q.loc[common], fc.loc[common])[0, 1]
+        if fc.empty:
+            r["correlation"] = np.nan
+            continue
+        pib_keys = pd.Series(pib_q.dropna().values,
+                             index=_idx_to_qkey(pib_q.dropna().index))
+        fc_keys = pd.Series(fc.dropna().values,
+                            index=_idx_to_qkey(fc.dropna().index))
+        common_keys = pib_keys.index.intersection(fc_keys.index)
+        if len(common_keys) >= 3:
+            corr = np.corrcoef(pib_keys.loc[common_keys],
+                               fc_keys.loc[common_keys])[0, 1]
         else:
             corr = np.nan
         r["correlation"] = corr
+
+    if errors:
+        results["_errors"] = errors
 
     return results
