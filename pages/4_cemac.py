@@ -152,6 +152,33 @@ if not icae_dict:
     st.warning("Aucun ICAE disponible.")
     st.stop()
 
+# ── Contrôle qualité : valeurs hors plage [50–200] ───────────────────────
+_out_of_range = []
+for _code, _ser in icae_dict.items():
+    try:
+        _vals = pd.to_numeric(_ser, errors="coerce").dropna()
+        if len(_vals) > 0 and (_vals.max() > 200 or _vals.min() < 50):
+            _out_of_range.append(
+                f"**{COUNTRY_NAMES.get(_code, _code)}** ({_code}) : "
+                f"min={_vals.min():.1f}, max={_vals.max():.1f}"
+            )
+    except Exception:
+        pass
+
+if _out_of_range:
+    with st.expander("⚠️ Valeurs ICAE hors plage [50–200] détectées — cliquer pour détails",
+                     expanded=True):
+        st.warning(
+            "Un ICAE correctement calculé (base 100) reste normalement entre **50 et 200**. "
+            "Les séries suivantes présentent des valeurs atypiques :"
+        )
+        for _msg in _out_of_range:
+            st.markdown(f"- {_msg}")
+        st.caption(
+            "Causes possibles : année de base incorrecte dans le fichier consolidé, "
+            "variable aberrante non neutralisée, ou fichier non mis à jour."
+        )
+
 # ── Période commune ──────────────────────────────────────────────────────
 st.header("2. Période de calcul")
 
