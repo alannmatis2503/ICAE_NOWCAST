@@ -9,3 +9,5 @@ dist/
 build/
 .streamlit/secrets.toml
 tests/output/
+Guide_Utilisateur_ICAE_BEAC.docx
+*.docx
