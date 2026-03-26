@@ -72,8 +72,9 @@ def chow_lin(y_a: np.ndarray, X_hf: np.ndarray, s: int = 4) -> np.ndarray:
     n_hf = X_hf.shape[0]
     C = _build_C(n_hf, n_a, s)
 
+    # Bounds élargis à [-0.99, 0.99] pour autoriser rho négatif (cf. R tempdisagg)
     res = minimize_scalar(
-        _chow_lin_objective, bounds=(0.01, 0.99), method="bounded",
+        _chow_lin_objective, bounds=(-0.99, 0.99), method="bounded",
         args=(y_a, X_hf, C),
     )
     rho_opt = res.x
@@ -97,14 +98,35 @@ def chow_lin(y_a: np.ndarray, X_hf: np.ndarray, s: int = 4) -> np.ndarray:
 # ────────────────────────────────────────────────────────────────────────────
 def denton_cholette(y_a: np.ndarray, n_sub: int, s: int = 4) -> np.ndarray:
     """
-    Denton-Cholette proportionnel (sans indicateur).
-    Distribue la valeur annuelle uniformément sur les s sous-périodes.
+    Denton-Cholette additif (sans indicateur).
+
+    Minimise les variations premières des résidus sous la contrainte
+    d'agrégation temporelle (cf. Denton 1971, Cholette & Dagum 1994).
+
+    Formulation GLS :
+        y = p + Σ C^T (C Σ C^T)^{-1} (y_a − C p)
+    où  Σ = pinv(D^T D),  D = matrice de différences premières,
+        p = distribution préliminaire uniforme (y_a[i] / s par an).
     """
     n_a = len(y_a)
-    y_hf = np.zeros(n_sub)
+    C = _build_C(n_sub, n_a, s)
+
+    # Distribution préliminaire uniforme
+    p = np.zeros(n_sub)
     for i in range(n_a):
-        y_hf[i * s: i * s + s] = y_a[i] / s
-    return y_hf
+        p[i * s: (i + 1) * s] = y_a[i] / s
+
+    # Matrice de lissage (pseudo-inverse de D'D — rang déficient en 0)
+    D = _diff_matrix(n_sub)
+    DtD = D.T @ D
+    Sigma = np.linalg.pinv(DtD)
+
+    # Correction GLS
+    C_Sigma = C @ Sigma
+    M = C_Sigma @ C.T + 1e-10 * np.eye(n_a)
+    residual = y_a - C @ p
+    correction = Sigma @ C.T @ np.linalg.solve(M, residual)
+    return p + correction
 
 
 # ────────────────────────────────────────────────────────────────────────────
