@@ -737,14 +737,21 @@ elif report_type == "Note Nowcast":
         st.stop()
 
     nowcast_data = st.session_state["nowcast_results"]
+    nowcast_pib = st.session_state.get("nowcast_pib", {})
 
     results_for_report = {}
     chart_bytes = {}
 
     for country_code, results in nowcast_data.items():
         perf_rows = []
+        best_model = None
+        best_rmse = np.inf
         for name, r in results.items():
             m = r["metrics"]
+            rmse_out = m["out_sample"].get("rmse", np.inf)
+            if not np.isnan(rmse_out) and rmse_out < best_rmse:
+                best_rmse = rmse_out
+                best_model = name
             perf_rows.append({
                 "Modèle": name,
                 "RMSE (in)": round(m["in_sample"].get("rmse", np.nan), 2),
@@ -753,14 +760,42 @@ elif report_type == "Note Nowcast":
                 "RMSE (out)": round(m["out_sample"].get("rmse", np.nan), 2),
                 "MAE (out)": round(m["out_sample"].get("mae", np.nan), 2),
                 "MAPE (out)": round(m["out_sample"].get("mape", np.nan), 2),
+                "Corrélation": round(r.get("correlation", np.nan), 3),
             })
+
+        pib_q = nowcast_pib.get(country_code)
+        forecasts = {m: r["forecast"] for m, r in results.items()}
+
         results_for_report[country_code] = {
             "metrics_df": pd.DataFrame(perf_rows),
+            "pib_q": pib_q,
+            "forecasts": forecasts,
+            "best_model": best_model,
+            "country_name": COUNTRY_NAMES.get(country_code, country_code),
         }
+
+        # ── Graphique nowcast pour le rapport ──
+        try:
+            from ui.charts import chart_nowcast
+            _fig_nw = chart_nowcast(pib_q, results,
+                                    title=f"PIB et Nowcasts — {COUNTRY_NAMES.get(country_code, country_code)}")
+            chart_bytes[country_code] = fig_to_png_bytes(_fig_nw)
+        except Exception:
+            pass
 
         st.subheader(f"Résultats — {COUNTRY_NAMES.get(country_code, country_code)}")
         st.dataframe(pd.DataFrame(perf_rows), use_container_width=True,
                      hide_index=True)
+        if best_model:
+            st.info(f"Meilleur modèle (RMSE out-of-sample) : **{best_model}**")
+
+    # ── Paramètres globaux pour la note ──
+    _nw_params = {
+        "periode": pd.Timestamp.now().strftime("%B %Y"),
+        "models_used": sorted({m for r in results_for_report.values()
+                               for m in r.get("forecasts", {}).keys()}),
+        "hf_vars": st.session_state.get("now_hf_vars", []),
+    }
 
     if st.button("📝 Générer la Note Nowcast", type="primary",
                  key="gen_note_nowcast"):
@@ -770,6 +805,7 @@ elif report_type == "Note Nowcast":
             results_by_country=results_for_report,
             chart_bytes=chart_bytes,
             logo_path=logo,
+            params=_nw_params,
         )
 
         download_button(

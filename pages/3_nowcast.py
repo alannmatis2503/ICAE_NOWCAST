@@ -205,7 +205,7 @@ with col2:
     # Forcer le reset du multiselect quand la méthode OU la source change
     _current_ctx = f"{_var_sel}|{hf_source}|{country}"
     _prev_ctx = st.session_state.get("_now_var_ctx_prev")
-    if _prev_ctx is not None and _prev_ctx != _current_ctx:
+    if _prev_ctx != _current_ctx:   # inclut le premier chargement (None != str)
         st.session_state.pop("now_hf_vars", None)
     st.session_state["_now_var_ctx_prev"] = _current_ctx
 

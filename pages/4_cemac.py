@@ -163,12 +163,30 @@ if not icae_dict:
 _out_of_range = []
 for _code, _ser in icae_dict.items():
     try:
-        _vals = pd.to_numeric(_ser, errors="coerce").dropna()
-        if len(_vals) > 0 and (_vals.max() > 200 or _vals.min() < 50):
-            _out_of_range.append(
-                f"**{COUNTRY_NAMES.get(_code, _code)}** ({_code}) : "
-                f"min={_vals.min():.1f}, max={_vals.max():.1f}"
-            )
+        _ser_num = pd.to_numeric(_ser, errors="coerce").dropna()
+        if len(_ser_num) == 0:
+            continue
+        _bad_mask = (_ser_num > 200) | (_ser_num < 50)
+        if _bad_mask.any():
+            _bad_vals = _ser_num[_bad_mask]
+            # Récupérer les dates associées si l'index est datetime
+            _idx = _bad_vals.index
+            if hasattr(_idx, "strftime"):
+                _periods_str = ", ".join(_idx.strftime("%b %Y").tolist()[:6])
+            elif hasattr(_idx, "to_timestamp"):
+                _periods_str = ", ".join(
+                    _idx.to_timestamp().strftime("%b %Y").tolist()[:6])
+            else:
+                _periods_str = ", ".join(str(i) for i in _idx.tolist()[:6])
+            if len(_bad_vals) > 6:
+                _periods_str += f" … ({len(_bad_vals)} valeurs au total)"
+            _out_of_range.append({
+                "label": f"**{COUNTRY_NAMES.get(_code, _code)}** ({_code})",
+                "min": _ser_num.min(),
+                "max": _ser_num.max(),
+                "n_bad": int(_bad_mask.sum()),
+                "periods": _periods_str,
+            })
     except Exception:
         pass
 
@@ -179,8 +197,11 @@ if _out_of_range:
             "Un ICAE correctement calculé (base 100) reste normalement entre **50 et 200**. "
             "Les séries suivantes présentent des valeurs atypiques :"
         )
-        for _msg in _out_of_range:
-            st.markdown(f"- {_msg}")
+        for _item in _out_of_range:
+            st.markdown(
+                f"- {_item['label']} : min={_item['min']:.1f}, max={_item['max']:.1f} "
+                f"— **{_item['n_bad']} période(s) concernée(s)** : {_item['periods']}"
+            )
         st.caption(
             "Causes possibles : année de base incorrecte dans le fichier consolidé, "
             "variable aberrante non neutralisée, ou fichier non mis à jour."
