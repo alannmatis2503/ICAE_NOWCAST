@@ -18,21 +18,25 @@ st.title("🔮 Module 3 — Nowcast")
 
 # ── Helpers ───────────────────────────────────────────────────────────────
 def _get_codif_vars(codif_df, available_cols):
-    """Retourne la liste des variables actives depuis la feuille Codification."""
+    """Retourne la liste des variables actives depuis la feuille Codification.
+
+    Correspond par Code ET par Label (insensible à la casse et aux espaces
+    superflus) pour gérer les classeurs dont les colonnes sont des libellés.
+    """
     if codif_df is None or "Code" not in codif_df.columns:
         return []
-    active_codes = set()
+    active_codes: set = set()
     for _, row in codif_df.iterrows():
         try:
             if float(row.get("PRIOR", 0)) > 0:
-                statut = str(row.get("Statut", "Actif")).lower()
+                statut = str(row.get("Statut", "Actif")).lower().strip()
                 if not statut.startswith("inact"):
-                    active_codes.add(str(row["Code"]))
+                    active_codes.add(str(row["Code"]).strip().lower())
                     if "Label" in codif_df.columns and pd.notna(row.get("Label")):
-                        active_codes.add(str(row["Label"]))
+                        active_codes.add(str(row["Label"]).strip().lower())
         except (ValueError, TypeError):
             pass
-    return [c for c in available_cols if c in active_codes]
+    return [c for c in available_cols if str(c).strip().lower() in active_codes]
 
 
 def _annualize_monthly(df, date_col, value_cols):
@@ -86,6 +90,11 @@ st.header("1. Indicateurs haute fréquence")
 
 # Auto-sélection si "séries prolongées" depuis Module 2
 _use_extended = st.session_state.pop("_nowcast_use_extended", False)
+if _use_extended:
+    # Purger les anciens résultats Nowcast pour forcer un recalcul avec
+    # les séries prolongées — évite de télécharger des résultats périmés
+    for _k in ("nowcast_results", "nowcast_pib"):
+        st.session_state.pop(_k, None)
 _hf_sources = ["Upload d'un fichier", "Données du Module 1"]
 _default_src = 1 if (_use_extended and "donnees_calcul" in st.session_state) else 0
 
@@ -616,8 +625,19 @@ if st.button("📥 Exporter les résultats Nowcast", key="export_nowcast"):
         "Modèles": ", ".join(models),
         "Nb facteurs": n_components,
         "Horizon": h_ahead,
+        "Séries prolongées": "Oui" if st.session_state.get("forecasts", {}).get(country) is not None else "Non",
     }
-    data = write_nowcast_excel(pib_aligned, results, params)
+    # Construire le DataFrame HF mensuel pour l'audit
+    _hf_export_df = None
+    if hf_df is not None and hf_vars:
+        _hf_export_cols = [date_col] + [v for v in hf_vars if v in hf_df.columns]
+        _hf_export_df = hf_df[_hf_export_cols].copy().rename(columns={date_col: "Date"})
+    data = write_nowcast_excel(
+        pib_aligned, results, params,
+        hf_vars=hf_vars,
+        agg_map=agg_map if "agg_map" in dir() else None,
+        hf_df=_hf_export_df,
+    )
     download_button(
         data,
         f"RESULT_NOWCAST_{country}_{pd.Timestamp.now().strftime('%Y-%m-%d')}.xlsx",

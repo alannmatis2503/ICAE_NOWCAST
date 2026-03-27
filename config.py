@@ -27,7 +27,9 @@ COUNTRY_NAMES = {
 
 # Poids PIB de référence (milliards FCFA) — source : ICAE_CEMAC_Consolide.xlsx
 # Année de base des poids : 2014
-PIB_REF_YEAR = "2014"
+PIB_REF_YEAR = "2019"
+# Poids PIB de référence (milliards FCFA) — source : ICAE_CEMAC_Consolide.xlsx
+# Volumes chaînés de 2019
 PIB_2014 = {
     "CMR": 22310.90,
     "RCA": 830.35,

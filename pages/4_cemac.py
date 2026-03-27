@@ -423,7 +423,7 @@ with tab3:
             ga_full.index = _full_dates
             contrib_full = ga_full * _poids_used.get(code, 0)
             # Filtrer sur la fenêtre d'affichage
-            contrib_disp = contrib_full[_graph_mask.values]
+            contrib_disp = contrib_full[_graph_mask]
             fig_contrib.add_trace(go.Bar(
                 x=_disp_df.index, y=contrib_disp,
                 name=f"{COUNTRY_NAMES.get(code, code)} ({round(_poids_used.get(code, 0) * 100, 1)}%)",

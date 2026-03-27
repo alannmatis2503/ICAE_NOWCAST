@@ -216,8 +216,17 @@ def write_previsions_excel(donnees: pd.DataFrame, previsions: dict,
 
 
 def write_nowcast_excel(pib_q: pd.Series, results: dict,
-                        params: dict = None) -> bytes:
-    """Génère le fichier Excel de résultats Nowcast."""
+                        params: dict = None,
+                        hf_vars: list = None,
+                        agg_map: dict = None,
+                        hf_df: pd.DataFrame = None) -> bytes:
+    """Génère le fichier Excel de résultats Nowcast.
+
+    Paramètres supplémentaires (optionnels) :
+    - hf_vars   : liste des variables HF utilisées
+    - agg_map   : dict variable → type d'agrégation (sum/mean/last)
+    - hf_df     : DataFrame mensuel des séries HF (pour audit)
+    """
     buf = io.BytesIO()
     with pd.ExcelWriter(buf, engine="xlsxwriter") as writer:
         # PIB et Nowcasts
@@ -251,6 +260,22 @@ def write_nowcast_excel(pib_q: pd.Series, results: dict,
                 ga_df[f"GA_{col}"] = (df[col] / df[col].shift(4) - 1) * 100
             ga_df.to_excel(writer, sheet_name="Glissement_Annuel")
 
+        # Indicateurs HF utilisés (audit)
+        if hf_vars:
+            hf_meta = pd.DataFrame({
+                "Variable": hf_vars,
+                "Aggregation": [
+                    (agg_map or {}).get(v, "sum") for v in hf_vars
+                ],
+            })
+            hf_meta.to_excel(writer, sheet_name="Indicateurs_HF", index=False)
+            # Données mensuelles HF si disponibles
+            if hf_df is not None and not hf_df.empty:
+                export_cols = [c for c in hf_vars if c in hf_df.columns]
+                if export_cols:
+                    hf_df[export_cols].to_excel(
+                        writer, sheet_name="Donnees_HF_mensuelles")
+
         # Paramètres
         if params:
             pd.DataFrame([params]).to_excel(
@@ -268,6 +293,20 @@ def _copy_cell_style(src_cell, dst_cell):
         dst_cell.border = copy.copy(src_cell.border)
         dst_cell.alignment = copy.copy(src_cell.alignment)
         dst_cell.number_format = src_cell.number_format
+
+
+def _actual_last_row(ws, check_cols: int = 4) -> int:
+    """Retourne le dernier numéro de ligne ayant au moins une cellule non-None.
+
+    openpyxl.max_row peut sur-estimer la plage quand des cellules vides ont
+    du formatage. On scanne en remontant depuis max_row pour éviter le bug.
+    """
+    n_check = min(check_cols, ws.max_column)
+    for r in range(ws.max_row, 0, -1):
+        for c in range(1, n_check + 1):
+            if ws.cell(r, c).value is not None:
+                return r
+    return ws.max_row
 
 
 def _detect_calcul_layout(ws):
@@ -348,7 +387,7 @@ def _write_icae_from_template(source_path,
     # ── 1) Étendre Donnees_calcul ─────────────────────────────────────────
     if "Donnees_calcul" in wb.sheetnames:
         ws_d = wb["Donnees_calcul"]
-        orig_max = ws_d.max_row            # ex: 184 (1 header + 183 data)
+        orig_max = _actual_last_row(ws_d)  # ex: 184 (1 header + 183 data)
         new_total = len(donnees) + 1       # header + données étendues
 
         if new_total > orig_max:
@@ -382,7 +421,7 @@ def _write_icae_from_template(source_path,
 
         # Déterminer le nombre de lignes originales vs étendues dans TCS
         data_start_calc = 16
-        orig_calc_max = ws_c.max_row       # dernière ligne TCS existante
+        orig_calc_max = _actual_last_row(ws_c)  # dernière ligne TCS existante
         orig_n_data = orig_max - 1 if "Donnees_calcul" in wb.sheetnames else 183
         ext_n_data = len(donnees)
         n_new = ext_n_data - orig_n_data   # lignes à ajouter
