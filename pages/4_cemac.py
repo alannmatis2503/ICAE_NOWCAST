@@ -6,7 +6,7 @@ import plotly.graph_objects as go
 from pathlib import Path
 
 from config import (CONSOLIDES, COUNTRY_CODES, COUNTRY_NAMES,
-                    PIB_2014, POIDS_PIB, CLOUD_MODE, CEMAC_TEMPLATE)
+                    PIB_2014, PIB_REF_YEAR, POIDS_PIB, CLOUD_MODE, CEMAC_TEMPLATE)
 from core.cemac_engine import compute_icae_cemac, quarterly_cemac
 from core.icae_engine import run_icae_pipeline
 from io_utils.excel_reader import (
@@ -24,7 +24,7 @@ _COUNTRY_COLORS = {
 
 
 def _process_country_file(source):
-    """Traite un fichier ICAE pays (chemin ou file-like) → (icae_series, dates) ou None."""
+    """Traite un fichier ICAE pays (chemin ou file-like) → (icae_series, dates, err) ou None."""
     try:
         if hasattr(source, 'seek'):
             source.seek(0)
@@ -32,7 +32,7 @@ def _process_country_file(source):
         if hasattr(source, 'seek'):
             source.seek(0)
         if "Donnees_calcul" not in _sh:
-            return None
+            return None, None, f"Feuille 'Donnees_calcul' absente. Feuilles trouvées : {_sh}"
         consignes = read_consignes(source) if "Consignes" in _sh else {"base_year": 2023}
         if hasattr(source, 'seek'):
             source.seek(0)
@@ -69,9 +69,10 @@ def _process_country_file(source):
         )
         icae = results["icae"]
         icae.index = dates
-        return icae, dates
-    except Exception:
-        return None
+        return icae, dates, None
+    except Exception as exc:
+        import traceback
+        return None, None, traceback.format_exc()
 
 
 st.title("🌍 Module 4 — Agrégation CEMAC")
@@ -111,17 +112,20 @@ elif source_mode == "Upload de fichiers":
                 uploaded_files[code] = f
 
     if not uploaded_files:
-        st.warning("Veuillez uploader au moins un fichier.")
-        st.stop()
+        st.info("Uploadez au moins un fichier consolidé ICAE pour continuer.")
+        # Ne pas appeler st.stop() ici — laisser Streamlit afficher les uploaders
 
     st.caption(f"📁 {len(uploaded_files)}/{len(COUNTRY_CODES)} fichiers uploadés")
     progress = st.progress(0)
     for i, (code, f) in enumerate(uploaded_files.items()):
-        result = _process_country_file(f)
-        if result is not None:
-            icae_dict[code], dates_dict[code] = result
+        icae_s, dates_s, err = _process_country_file(f)
+        if icae_s is not None:
+            icae_dict[code], dates_dict[code] = icae_s, dates_s
         else:
             st.warning(f"⚠️ Erreur pour {code}")
+            if err:
+                with st.expander(f"Détails erreur {code}", expanded=False):
+                    st.code(err)
         progress.progress((i + 1) / len(uploaded_files))
 
     if icae_dict:
@@ -137,11 +141,14 @@ elif source_mode == "Calcul depuis les fichiers consolidés":
             st.warning(f"⚠️ Fichier manquant : {fpath.name}")
             progress.progress((i + 1) / len(COUNTRY_CODES))
             continue
-        result = _process_country_file(fpath)
-        if result is not None:
-            icae_dict[code], dates_dict[code] = result
+        icae_s, dates_s, err = _process_country_file(fpath)
+        if icae_s is not None:
+            icae_dict[code], dates_dict[code] = icae_s, dates_s
         else:
             st.warning(f"⚠️ Erreur pour {code}")
+            if err:
+                with st.expander(f"Détails erreur {code}", expanded=False):
+                    st.code(err)
         progress.progress((i + 1) / len(COUNTRY_CODES))
 
     if icae_dict:
@@ -292,13 +299,15 @@ with st.expander("📂 Recalculer les poids depuis un fichier PIB", expanded=Fal
                                     pass
                         if _new_pibs:
                             st.session_state["cemac_custom_pib"] = _new_pibs
+                            st.session_state["cemac_pib_year"] = _ref_year
                             st.success(f"✅ PIB {_ref_year} appliqués pour : {list(_new_pibs.keys())}")
         except Exception as _e:
             st.warning(f"Erreur lecture fichier PIB : {_e}")
 
 # Initialiser les valeurs PIB (custom ou défaut)
 _base_pib = st.session_state.get("cemac_custom_pib", PIB_2014)
-_pib_label = "PIB (Mds FCFA)"
+_pib_ref_year = st.session_state.get("cemac_pib_year", PIB_REF_YEAR)
+_pib_label = f"PIB {_pib_ref_year} (Mds FCFA)"
 
 poids_data = []
 for code in COUNTRY_CODES:

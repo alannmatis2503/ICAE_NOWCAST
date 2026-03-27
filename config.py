@@ -25,7 +25,9 @@ COUNTRY_NAMES = {
     "TCD": "Tchad",
 }
 
-# Poids PIB 2014 (milliards FCFA) — source : ICAE_CEMAC_Consolide.xlsx
+# Poids PIB de référence (milliards FCFA) — source : ICAE_CEMAC_Consolide.xlsx
+# Année de base des poids : 2014
+PIB_REF_YEAR = "2014"
 PIB_2014 = {
     "CMR": 22310.90,
     "RCA": 830.35,

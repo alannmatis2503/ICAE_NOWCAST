@@ -52,6 +52,9 @@ def _future_dates(last_date, horizon, freq):
 
 def _format_dates(dates, freq):
     """Formate les dates pour l'affichage selon la fréquence."""
+    # Convertir en DatetimeIndex si c'est un Series (Series n'a pas .strftime)
+    if isinstance(dates, pd.Series):
+        dates = pd.DatetimeIndex(dates)
     if freq == "Mensuelle":
         return dates.strftime("%Y-%m")
     elif freq == "Trimestrielle":

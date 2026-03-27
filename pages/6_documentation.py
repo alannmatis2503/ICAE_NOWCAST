@@ -150,13 +150,14 @@ le total annuel en trimestres en perturbant le moins possible le profil d'un ind
 de référence (ou une interpolation linéaire si aucun indicateur n'est fourni).
 
 **Fonction objectif (variante proportionnelle) :**
-$$\\min_{\\hat{Y}} \\sum_{t=2}^{T} \\left(\\frac{\\hat{Y}_t}{\\hat{X}_t} - \\frac{\\hat{Y}_{t-1}}{\\hat{X}_{t-1}}\\right)^2
-\\quad \\text{sous contrainte} \\quad \\sum_{t \\in A} \\hat{Y}_t = Y^A$$
 
-où $\\hat{X}_t$ est l'indicateur (ou 1 si aucun indicateur), et la contrainte impose la
-cohérence avec les totaux annuels.
+$$\\min_{\\hat{Y}} \\sum_{t=2}^{T} \\left(\\frac{\\hat{Y}_t}{\\hat{X}_t} - \\frac{\\hat{Y}_{t-1}}{\\hat{X}_{t-1}}\\right)^2 \\quad \\text{s.c.} \\quad \\sum_{t \\in A} \\hat{Y}_t = Y^A$$
+
+ou $\\hat{X}_t$ est l'indicateur (ou 1 si aucun indicateur), et la contrainte impose la
+coherence avec les totaux annuels.
 
 **Variante additive :**
+
 $$\\min_{\\hat{Y}} \\sum_{t=2}^{T} \\left[(\\hat{Y}_t - \\hat{X}_t) - (\\hat{Y}_{t-1} - \\hat{X}_{t-1})\\right]^2$$
 
 **Usage :** Recommandé quand aucun indicateur HF n'est disponible ou en cas de doute
