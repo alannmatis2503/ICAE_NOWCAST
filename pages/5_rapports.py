@@ -747,6 +747,8 @@ elif report_type == "Note Nowcast":
         best_model = None
         best_rmse = np.inf
         for name, r in results.items():
+            if name.startswith("_") or not isinstance(r, dict) or "metrics" not in r:
+                continue
             m = r["metrics"]
             rmse_out = m["out_sample"].get("rmse", np.inf)
             if not np.isnan(rmse_out) and rmse_out < best_rmse:
@@ -764,7 +766,8 @@ elif report_type == "Note Nowcast":
             })
 
         pib_q = nowcast_pib.get(country_code)
-        forecasts = {m: r["forecast"] for m, r in results.items()}
+        forecasts = {m: r["forecast"] for m, r in results.items()
+                     if not m.startswith("_") and isinstance(r, dict) and "forecast" in r}
 
         results_for_report[country_code] = {
             "metrics_df": pd.DataFrame(perf_rows),

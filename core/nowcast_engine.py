@@ -35,11 +35,9 @@ def _prepare_data(pib_q: pd.Series, hf_q: pd.DataFrame,
                   h_ahead: int = 4) -> dict | str:
     """Prépare les données communes pour tous les modèles.
 
-    Aligne PIB et HF sur la fenêtre temporelle commune (inner join) pour
-    l'estimation, et identifie les trimestres HF au-delà du dernier PIB
-    connu (hf_future) pour l'extrapolation hors-échantillon (nowcast réel).
-
-    Retourne un dict ou un message d'erreur (str) si pas de fenêtre commune.
+    Aligne PIB et HF sur la fenêtre temporelle commune (inner join).
+    Retourne un dict avec les données alignées et _align_info décrivant
+    les plages de chaque série, ou un message d'erreur (str).
     """
     # ── Construire un DataFrame PIB avec clé texte ──
     pib_df = pd.DataFrame({
@@ -85,27 +83,21 @@ def _prepare_data(pib_q: pd.Series, hf_q: pd.DataFrame,
     # Index PeriodIndex pour les résultats in-sample
     index = pd.PeriodIndex([pd.Period(q, 'Q') for q in qkeys])
 
-    # ── Trimestres HF au-delà du dernier PIB (nowcast réel) ──
-    last_pib_qkey = pib_df['_qkey'].iloc[-1]
-    future_rows = hf_temp[hf_temp['_qkey'] > last_pib_qkey].copy()
-    future_cols = [c for c in hf.columns if c in future_rows.columns]
-    if not future_rows.empty and future_cols:
-        hf_future = future_rows[future_cols + ['_qkey']].copy()
-        hf_future_qkeys = hf_future['_qkey'].values
-        hf_future_data = hf_future.drop(columns=['_qkey'])
-        # Imputer les NA par la moyenne de l'historique
-        hf_future_data = hf_future_data.fillna(hf[future_cols].mean())
-        index_future = pd.PeriodIndex(
-            [pd.Period(q, 'Q') for q in hf_future_qkeys])
-    else:
-        hf_future_data = pd.DataFrame(columns=list(hf.columns))
-        index_future = pd.PeriodIndex([], freq='Q')
+    # ── Informations d'alignement pour alerter l'utilisateur ──
+    n_hf_beyond = len(hf_temp[hf_temp['_qkey'] > pib_df['_qkey'].iloc[-1]])
+    n_pib_before = len(pib_df[pib_df['_qkey'] < hf_temp['_qkey'].iloc[0]])
+    align_info = {
+        "pib_range": f"{pib_df['_qkey'].iloc[0]} – {pib_df['_qkey'].iloc[-1]}",
+        "hf_range": f"{hf_temp['_qkey'].iloc[0]} – {hf_temp['_qkey'].iloc[-1]}",
+        "common_range": f"{qkeys[0]} – {qkeys[-1]}",
+        "n_hf_beyond_pib": n_hf_beyond,
+        "n_pib_before_hf": n_pib_before,
+    }
 
     return {
         "pib": pib, "hf": hf, "n": n, "n_train": n_train,
         "index": index,
-        "hf_future": hf_future_data,   # HF pour trimestres hors-PIB
-        "index_future": index_future,  # index de ces trimestres futurs
+        "_align_info": align_info,
     }
 
 
@@ -158,43 +150,8 @@ def fit_bridge(pib_q: pd.Series, hf_q: pd.DataFrame,
     result = pd.Series(np.nan, index=data["index"])
     result.iloc[1:] = forecast
 
-    # ── Extrapolation hors-échantillon (trimestres au-delà du dernier PIB) ──
-    hf_future = data.get("hf_future", pd.DataFrame())
-    idx_future = data.get("index_future", pd.PeriodIndex([], freq='Q'))
-    if not hf_future.empty and len(idx_future) > 0:
-        fut_cols = [c for c in hf.columns if c in hf_future.columns]
-        if fut_cols:
-            # Buffer = dernière ligne HF training + lignes futures (pour les lags)
-            buf = pd.concat(
-                [hf.iloc[[-1]][fut_cols], hf_future[fut_cols]], ignore_index=True
-            ).fillna(hf[fut_cols].mean())
-            buf_scaled = scaler.transform(buf.values)
-            buf_pcs = pca.fit_transform(scaler.transform(hf.values))
-            # Recalculer les PC du buffer avec le PCA déjà fitté
-            buf_pcs_buf = pca.transform(buf_scaled)
-            pc1_buf = buf_pcs_buf[:, 0]
-
-            n_fut = len(hf_future)
-            X_fut = np.column_stack([
-                np.ones(n_fut),
-                pc1_buf[1:],   # PC1[t]
-                pc1_buf[:-1],  # PC1[t-1]
-            ])
-            for v in top2:
-                if v in fut_cols:
-                    lag_col = pd.concat(
-                        [hf.iloc[[-1]][[v]], hf_future[[v]]], ignore_index=True
-                    )[v].values[:-1]
-                else:
-                    lag_col = np.full(n_fut, hf[v].mean() if v in hf.columns else 0.0)
-                if X_fut.shape[0] == len(lag_col):
-                    X_fut = np.column_stack([X_fut, lag_col])
-
-            if X_fut.shape[1] == len(beta):
-                fc_fut = X_fut @ beta
-                result = pd.concat([result, pd.Series(fc_fut, index=idx_future)])
-
-    return {"forecast": result, "name": "Bridge", "beta": beta}
+    return {"forecast": result, "name": "Bridge", "beta": beta,
+            "_align_info": data.get("_align_info")}
 
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -239,24 +196,8 @@ def fit_umidas(pib_q: pd.Series, hf_q: pd.DataFrame,
     result = pd.Series(np.nan, index=data["index"])
     result.iloc[2:] = forecast
 
-    # ── Extrapolation hors-échantillon ──
-    hf_future = data.get("hf_future", pd.DataFrame())
-    idx_future = data.get("index_future", pd.PeriodIndex([], freq='Q'))
-    if not hf_future.empty and len(idx_future) > 0 and best in hf_future.columns:
-        # Buffer : dernières 2 valeurs training + valeurs futures
-        buf_x = np.concatenate([x[-2:], hf_future[best].values])
-        n_fut = len(hf_future)
-        X_fut = np.column_stack([
-            np.ones(n_fut),
-            buf_x[2:],    # x[t]
-            buf_x[1:-1],  # x[t-1]
-            buf_x[:-2],   # x[t-2]
-        ])
-        if X_fut.shape[1] == len(beta):
-            fc_fut = X_fut @ beta
-            result = pd.concat([result, pd.Series(fc_fut, index=idx_future)])
-
-    return {"forecast": result, "name": "U-MIDAS"}
+    return {"forecast": result, "name": "U-MIDAS",
+            "_align_info": data.get("_align_info")}
 
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -286,27 +227,8 @@ def fit_pc(pib_q: pd.Series, hf_q: pd.DataFrame,
     forecast = X @ beta
     result = pd.Series(forecast, index=data["index"])
 
-    # ── Extrapolation hors-échantillon (pas de lags, le plus simple) ──
-    hf_future = data.get("hf_future", pd.DataFrame())
-    idx_future = data.get("index_future", pd.PeriodIndex([], freq='Q'))
-    if not hf_future.empty and len(idx_future) > 0:
-        fut_cols = [c for c in hf.columns if c in hf_future.columns]
-        if fut_cols:
-            hf_fut = hf_future[fut_cols].fillna(hf[fut_cols].mean())
-            # Aligner les colonnes sur celles vues par scaler/pca
-            hf_aligned = pd.DataFrame(
-                np.zeros((len(hf_fut), hf.shape[1])), columns=hf.columns
-            )
-            for c in fut_cols:
-                hf_aligned[c] = hf_fut[c].values
-            X_fut_scaled = scaler.transform(hf_aligned.values)
-            pcs_fut = pca.transform(X_fut_scaled)
-            X_fut = np.column_stack([np.ones(len(pcs_fut)), pcs_fut])
-            if X_fut.shape[1] == len(beta):
-                fc_fut = X_fut @ beta
-                result = pd.concat([result, pd.Series(fc_fut, index=idx_future)])
-
-    return {"forecast": result, "name": "PC"}
+    return {"forecast": result, "name": "PC",
+            "_align_info": data.get("_align_info")}
 
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -344,35 +266,8 @@ def fit_dfm(pib_q: pd.Series, hf_q: pd.DataFrame,
     result = pd.Series(np.nan, index=data["index"])
     result.iloc[1:] = forecast
 
-    # ── Extrapolation hors-échantillon ──
-    hf_future = data.get("hf_future", pd.DataFrame())
-    idx_future = data.get("index_future", pd.PeriodIndex([], freq='Q'))
-    if not hf_future.empty and len(idx_future) > 0:
-        fut_cols = [c for c in hf.columns if c in hf_future.columns]
-        if fut_cols:
-            buf = pd.concat(
-                [hf.iloc[[-1]][fut_cols], hf_future[fut_cols]], ignore_index=True
-            ).fillna(hf[fut_cols].mean())
-            # Aligner sur toutes les colonnes du scaler
-            buf_aligned = pd.DataFrame(
-                np.zeros((len(buf), hf.shape[1])), columns=hf.columns
-            )
-            for c in fut_cols:
-                buf_aligned[c] = buf[c].values
-            buf_scaled = scaler.transform(buf_aligned.values)
-            buf_f = pca.transform(buf_scaled).flatten()
-
-            n_fut = len(hf_future)
-            X_fut = np.column_stack([
-                np.ones(n_fut),
-                buf_f[1:],   # f[t]
-                buf_f[:-1],  # f[t-1]
-            ])
-            if X_fut.shape[1] == len(beta):
-                fc_fut = X_fut @ beta
-                result = pd.concat([result, pd.Series(fc_fut, index=idx_future)])
-
-    return {"forecast": result, "name": "DFM"}
+    return {"forecast": result, "name": "DFM",
+            "_align_info": data.get("_align_info")}
 
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -429,6 +324,7 @@ def run_nowcast(pib_q: pd.Series, hf_q: pd.DataFrame,
 
     results = {}
     errors = []
+    align_info = None  # récupéré du premier modèle qui réussit
     for name in models:
         fn = MODEL_DISPATCH[name]
         if name == "PC":
@@ -438,6 +334,9 @@ def run_nowcast(pib_q: pd.Series, hf_q: pd.DataFrame,
 
         if "error" in res:
             errors.append(f"{name}: {res['error']}")
+
+        if align_info is None and res.get("_align_info"):
+            align_info = res["_align_info"]
 
         metrics = compute_ins_out_metrics(pib_q, res["forecast"], h_test)
         results[name] = {
@@ -465,5 +364,7 @@ def run_nowcast(pib_q: pd.Series, hf_q: pd.DataFrame,
 
     if errors:
         results["_errors"] = errors
+    if align_info:
+        results["_align"] = align_info
 
     return results

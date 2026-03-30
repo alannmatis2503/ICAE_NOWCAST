@@ -472,7 +472,12 @@ if uploaded_pib:
                     for v in sample)
     
     if is_annual:
-        st.info("📅 PIB détecté comme **annuel**.")
+        _pib_years = pib_series[pib_date_col].astype(int)
+        st.info(
+            f"📅 PIB détecté comme **annuel** — {_pib_years.min()}–{_pib_years.max()} "
+            f"({len(_pib_years)} années). La trimestrialisation produira "
+            f"{len(_pib_years) * 4} trimestres."
+        )
         auto_disagg = st.checkbox("Trimestrialiser automatiquement",
                                   key="now_auto_disagg")
         disagg_method = st.selectbox(
@@ -560,7 +565,18 @@ if st.button("🚀 Lancer le Nowcast", type="primary", key="run_nowcast"):
         # Index par quarter
         if "quarter" in hf_q.columns:
             hf_q = hf_q.set_index("quarter")
-        
+
+        # Information d'alignement amont (avant le run_nowcast)
+        _pib_start = str(pib_q.index[0]) if len(pib_q) > 0 else "?"
+        _pib_end = str(pib_q.index[-1]) if len(pib_q) > 0 else "?"
+        _hf_start = str(hf_q.index[0]) if len(hf_q) > 0 else "?"
+        _hf_end = str(hf_q.index[-1]) if len(hf_q) > 0 else "?"
+        st.info(
+            f"**Séries en entrée**  \n"
+            f"- PIB trimestriel : **{_pib_start} → {_pib_end}** ({len(pib_q)} trimestres)  \n"
+            f"- Indicateurs HF (agrégés) : **{_hf_start} → {_hf_end}** ({len(hf_q)} trimestres)"
+        )
+
         pib_aligned = pib_q.copy()
         
         results = run_nowcast(
@@ -570,12 +586,43 @@ if st.button("🚀 Lancer le Nowcast", type="primary", key="run_nowcast"):
             n_components=n_components,
         )
         
-        # Afficher les erreurs d'alignement éventuelles
+        # Afficher les erreurs éventuelles
         _nowcast_errors = results.pop("_errors", [])
         if _nowcast_errors:
             for _e in _nowcast_errors:
                 st.warning(f"⚠️ {_e}")
-        
+
+        # Message d'alignement temporel PIB / HF
+        _align = results.pop("_align", None)
+        if _align:
+            _pib_r = _align.get("pib_range", "?")
+            _hf_r = _align.get("hf_range", "?")
+            _com_r = _align.get("common_range", "?")
+            _n_beyond = _align.get("n_hf_beyond_pib", 0)
+            _n_before = _align.get("n_pib_before_hf", 0)
+            _msg = (
+                f"**Alignement temporel des séries**  \n"
+                f"- PIB trimestriel : **{_pib_r}**  \n"
+                f"- Indicateurs HF (agrégés) : **{_hf_r}**  \n"
+                f"- Fenêtre commune utilisée : **{_com_r}**"
+            )
+            _details = []
+            if _n_beyond > 0:
+                _details.append(
+                    f"{_n_beyond} trimestre(s) HF postérieur(s) au dernier PIB connu "
+                    f"ne peuvent pas être nowcastés (PIB de référence absent)."
+                )
+            if _n_before > 0:
+                _details.append(
+                    f"{_n_before} trimestre(s) PIB antérieur(s) aux séries HF "
+                    f"ont été exclus."
+                )
+            if _details:
+                _msg += "  \n\n" + "  \n".join(f"⚠️ {d}" for d in _details)
+                st.warning(_msg)
+            else:
+                st.info(_msg)
+
         st.session_state["nowcast_results"] = {country: results}
         st.session_state["nowcast_pib"] = {country: pib_aligned}
         st.success("✅ Nowcast terminé !")
@@ -599,6 +646,8 @@ with tab1:
 with tab2:
     perf_rows = []
     for name, r in results.items():
+        if name.startswith("_") or not isinstance(r, dict) or "metrics" not in r:
+            continue
         m = r["metrics"]
         perf_rows.append({
             "Modèle": name,

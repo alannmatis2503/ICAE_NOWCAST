@@ -61,10 +61,13 @@ def write_icae_output(source_path, results: dict, country_code: str) -> bytes:
             dates_ts = pd.to_datetime(dates)
             quarter_groups = {}
             for i, d in enumerate(dates_ts):
-                qkey = f"{d.year}T{(d.month - 1) // 3 + 1}"
-                if qkey not in quarter_groups:
-                    quarter_groups[qkey] = []
-                quarter_groups[qkey].append(data_start_row + i)
+                q_num = (d.month - 1) // 3 + 1
+                # Stocker avec les deux formats possibles (T et Q)
+                for sep in ("T", "Q"):
+                    qkey = f"{d.year}{sep}{q_num}"
+                    if qkey not in quarter_groups:
+                        quarter_groups[qkey] = []
+                    quarter_groups[qkey].append(data_start_row + i)
 
             # En-têtes pour Resultats_Trim
             headers = ["Trimestre", "ICAE_Trim", "GA_Trim", "GT_Trim"]
@@ -232,6 +235,8 @@ def write_nowcast_excel(pib_q: pd.Series, results: dict,
         # PIB et Nowcasts
         df = pd.DataFrame({"PIB_observe": pib_q})
         for name, r in results.items():
+            if name.startswith("_") or not isinstance(r, dict) or "forecast" not in r:
+                continue
             fc = r["forecast"]
             df[name] = fc.reindex(df.index)
         df.to_excel(writer, sheet_name="PIB_and_Nowcasts")
@@ -239,6 +244,8 @@ def write_nowcast_excel(pib_q: pd.Series, results: dict,
         # Performance
         perf_rows = []
         for name, r in results.items():
+            if name.startswith("_") or not isinstance(r, dict) or "metrics" not in r:
+                continue
             m = r["metrics"]
             perf_rows.append({
                 "Modele": name,
@@ -566,10 +573,12 @@ def _write_icae_from_template(source_path,
         dates_all = pd.to_datetime(results.get("dates", donnees["Date"]))
         quarter_groups = {}
         for i, d in enumerate(dates_all):
-            qkey = f"{d.year}T{(d.month - 1) // 3 + 1}"
-            if qkey not in quarter_groups:
-                quarter_groups[qkey] = []
-            quarter_groups[qkey].append(data_start_calc + i)
+            q_num = (d.month - 1) // 3 + 1
+            for sep in ("T", "Q"):
+                qkey = f"{d.year}{sep}{q_num}"
+                if qkey not in quarter_groups:
+                    quarter_groups[qkey] = []
+                quarter_groups[qkey].append(data_start_calc + i)
 
         # Écrire les données trimestrielles (garder la ligne 1 d'en-têtes)
         for idx in range(len(q)):

@@ -142,6 +142,29 @@ if mode == "Désagrégation temporelle":
     selected_annual_vars = st.multiselect("Variables à désagréger", annual_vars,
                                           default=annual_vars[:5], key="disagg_vars")
 
+    # Message d'alignement série annuelle / indicateur HF
+    if hf_df is not None and selected_annual_vars:
+        _s_disagg = 4 if target_freq == "Trimestrielle" else 12
+        _n_annual = int(df_annual[selected_annual_vars].dropna(how="all").shape[0])
+        _n_hf_needed = _n_annual * _s_disagg
+        _n_hf_avail = len(hf_df)
+        _y_min = df_annual.index.min()
+        _y_max = df_annual.index.max()
+        _align_msg = (
+            f"**Alignement série annuelle / indicateur HF**  \n"
+            f"- Série annuelle : **{_y_min} – {_y_max}** ({_n_annual} années)"
+            f" → {_n_hf_needed} sous-périodes nécessaires ({target_freq.lower()})  \n"
+            f"- Indicateur HF : **{_n_hf_avail} lignes** disponibles"
+        )
+        if _n_hf_avail < _n_hf_needed:
+            st.warning(
+                _align_msg + f"  \n\n"
+                f"⚠️ L'indicateur HF est insuffisant ({_n_hf_avail} < {_n_hf_needed}). "
+                f"La méthode **Denton-Cholette** (sans indicateur) sera utilisée à la place."
+            )
+        else:
+            st.info(_align_msg + " — suffisant pour Chow-Lin.")
+
     if st.button("🚀 Lancer la désagrégation", type="primary", key="run_disagg"):
         results_disagg = {}
         progress = st.progress(0)

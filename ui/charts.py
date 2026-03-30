@@ -103,6 +103,8 @@ def chart_nowcast(pib_q, results, title="PIB observé vs Nowcasts"):
     ))
 
     for name, r in results.items():
+        if name.startswith("_") or not isinstance(r, dict) or "forecast" not in r:
+            continue
         fc = r["forecast"]
         idx = fc.index.to_timestamp() if hasattr(fc.index, 'to_timestamp') else fc.index
         fig.add_trace(go.Scatter(
@@ -187,6 +189,8 @@ def chart_ga_nowcast(pib_q, results, title="GA du PIB et des Nowcasts"):
     ))
 
     for name, r in results.items():
+        if name.startswith("_") or not isinstance(r, dict) or "forecast" not in r:
+            continue
         fc = r["forecast"]
         ga_fc = (fc / fc.shift(4) - 1) * 100
         fc_idx = ga_fc.index.to_timestamp() if hasattr(ga_fc.index, 'to_timestamp') else ga_fc.index

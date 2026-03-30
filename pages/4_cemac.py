@@ -224,7 +224,7 @@ if _country_ranges:
     _total_start = min(r[0] for r in _country_ranges.values())
     _total_end = max(r[1] for r in _country_ranges.values())
 
-    with st.expander("📅 Fenêtre temporelle des séries pays", expanded=True):
+    with st.expander("📅 Alignement temporel des séries pays", expanded=True):
         _range_rows = []
         for code, (s, e) in _country_ranges.items():
             _range_rows.append({
@@ -234,11 +234,26 @@ if _country_ranges:
             })
         st.dataframe(pd.DataFrame(_range_rows), use_container_width=True,
                      hide_index=True)
-        st.caption(
-            f"Période commune : **{_common_start.strftime('%Y-%m')}** — "
-            f"**{_common_end.strftime('%Y-%m')}** | "
-            f"Totale : {_total_start.strftime('%Y-%m')} — {_total_end.strftime('%Y-%m')}"
-        )
+        # Vérifier si les séries ont des périodes différentes
+        _starts = [r[0] for r in _country_ranges.values()]
+        _ends = [r[1] for r in _country_ranges.values()]
+        _all_same = (max(_starts) == min(_starts)) and (max(_ends) == min(_ends))
+        if _all_same:
+            st.info(
+                f"Toutes les séries couvrent la même période : "
+                f"**{_common_start.strftime('%Y-%m')}** — **{_common_end.strftime('%Y-%m')}**."
+            )
+        else:
+            st.warning(
+                f"**Les séries ne couvrent pas toutes la même période.**  \n"
+                f"- Période commune : **{_common_start.strftime('%Y-%m')}** — "
+                f"**{_common_end.strftime('%Y-%m')}**  \n"
+                f"- Étendue totale : {_total_start.strftime('%Y-%m')} — {_total_end.strftime('%Y-%m')}  \n\n"
+                f"L'ICAE CEMAC est calculé comme une moyenne pondérée des pays **disponibles** "
+                f"pour chaque mois. Les mois où certains pays n'ont pas de données seront "
+                f"agrégés avec un sous-ensemble de pays, ce qui peut affecter la comparabilité "
+                f"de la série dans le temps."
+            )
 
     _pc1, _pc2 = st.columns(2)
     with _pc1:
@@ -597,8 +612,11 @@ if _has_nowcast:
     _nw_results = st.session_state["nowcast_results"]   # {pays: {modele: {forecast, ...}}}
     _nw_pib = st.session_state["nowcast_pib"]           # {pays: pd.Series PIB obs}
 
-    # Sélection du modèle à afficher
-    _all_models = sorted({m for res in _nw_results.values() for m in res.keys()})
+    # Sélection du modèle à afficher (exclure les clés internes)
+    _all_models = sorted({
+        m for res in _nw_results.values() for m in res.keys()
+        if not m.startswith("_")
+    })
     _sel_model = st.selectbox("Modèle Nowcast à afficher",
                               _all_models, key="cemac_nw_model") if _all_models else None
 
